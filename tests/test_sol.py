@@ -168,10 +168,12 @@ class SolTests(unittest.TestCase):
         first = state['mid']
         self.s.set_state(uid, state)
         self.assertNotIn('Следующие 5', str(self.app.render(uid)))
+        self.assertIn('1 / 60', self.app.render(uid)['text'])
         for _ in range(5):
             state = self.app.action(uid, state, 'page', '1')
             self.s.set_state(uid, state)
         self.assertEqual(len(state['rec_batch']), 10)
+        self.assertIn('6 / 60', self.app.render(uid)['text'])
         self.assertEqual(state['mid'], state['rec_batch'][5])
         self.assertEqual(len(set(state['rec_batch'])), 10)
         for _ in range(6):

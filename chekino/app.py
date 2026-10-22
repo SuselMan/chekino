@@ -26,14 +26,18 @@ class App:
     def recommend(self, uid, state, append=False):
         history = self.visible_ids(uid, state) if append and state.get('mode') == 'new' else []
         excluded = self.s.catalog() | self.s.seen() | self.s.rejected() | set(history)
+        total = state.get('rec_total', 0) if append else 0
         try:
             if self.recommender:
+                ready_count = len(self.recommender.available(excluded))
+                if not total or len(history) >= total:
+                    total = len(history) + ready_count
                 movies = self.recommender.recommend_many(excluded, 5)
             else:
                 movie = self.provider.recommend(excluded, self.s.preferences(self.users))
                 movies = [movie] if movie else []
         except RecommendationPending:
-            return {**({'rec_batch': history, 'mid': state.get('mid'), 'rec_append': True} if append else {}),
+            return {**({'rec_batch': history, 'mid': state.get('mid'), 'rec_append': True, 'rec_total': total} if append else {}),
                     'mode': 'new', 'ai_pending': True,
                     'notice': 'Sol готовит запас рекомендаций. Первые варианты появятся автоматически.'}
         if not movies:
@@ -42,7 +46,8 @@ class App:
         for movie in movies:
             self.s.cache(movie)
         self.s.record_recommendation(uid, movies[0]['id'])
-        return {'mode': 'new', 'mid': movies[0]['id'], 'rec_batch': history + [m['id'] for m in movies]}
+        return {'mode': 'new', 'mid': movies[0]['id'], 'rec_batch': history + [m['id'] for m in movies],
+                'rec_total': max(total, len(history) + len(movies))}
 
     def refresh_recommendations(self):
         if not self.recommender or self.recommender.pending():
@@ -160,7 +165,8 @@ class App:
                 return self.recommend(uid, {**state, 'rec_batch': remaining, 'mid': remaining[-1] if remaining else None}, append=True)
             next_mid = remaining[pos]
             self.s.record_recommendation(uid, next_mid)
-            return {'mode': 'new', 'mid': next_mid, 'rec_batch': remaining}
+            return {'mode': 'new', 'mid': next_mid, 'rec_batch': remaining,
+                    'rec_total': max(len(remaining), state.get('rec_total', len(ids)) - 1)}
         if action == 'restore' and state.get('mode') == 'archive':
             self.s.restore(mid)
             return {'mode': 'archive'}
@@ -293,7 +299,8 @@ class App:
                 self.s.db.execute('UPDATE users SET state=? WHERE id=?',
                                   (json.dumps(state, ensure_ascii=False), uid))
             if mid:
-                lines.append(f'{ids.index(mid) + 1} / {len(ids)}')
+                total = max(len(ids), state.get('rec_total', len(ids))) if mode == 'new' else len(ids)
+                lines.append(f'{ids.index(mid) + 1} / {total}')
                 if mode != 'search' or len(ids) > 1:
                     rows.append([b('⬅️', 'page:-1'), b('➡️', 'page:1')])
             else:
