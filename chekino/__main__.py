@@ -70,7 +70,7 @@ def main():
         else:
             with store.transaction():
                 data = {table: [dict(r) for r in store.db.execute('SELECT * FROM ' + table)]
-                        for table in ('movies', 'ratings', 'rating_history')}
+                        for table in ('movies', 'ratings', 'rating_history', 'rejections', 'recommendation_seen')}
             destination.write_text(json.dumps(data, ensure_ascii=False, indent=2))
         print('Приватная копия создана.')
         return
@@ -94,6 +94,7 @@ def main():
                   cfg.get('reveal_partner', False), recommender=recommender, normalizer=normalizer)
         while True:
             try:
+                recommender.maintain()
                 app.refresh_recommendations()
                 verify_lookup = app.refresh_lookups()
                 app.deliver()
@@ -103,7 +104,7 @@ def main():
                 waiting = any((store.user(uid) or {}).get('state', {}).get('ai_pending') or
                               (store.user(uid) or {}).get('state', {}).get('lookup_pending')
                               for uid in cfg['users'])
-                updates = tg.call('getUpdates', offset=store.offset(), timeout=2 if waiting else 25,
+                updates = tg.call('getUpdates', offset=store.offset(), timeout=2 if waiting or recommender.future else 25,
                                   allowed_updates=['message', 'callback_query'])
                 for update in updates:
                     try:

@@ -7,10 +7,11 @@ import subprocess
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import time
+from .api import ApiError
 
 
 MODEL = 'gpt-6.1-sol'
-PROMPT_VERSION = 1
+PROMPT_VERSION = 2
 
 
 class RecommendationError(ValueError):
@@ -34,21 +35,23 @@ class SolClient:
             'не означает неприязнь. Если у B пока нет оценок, не выдумывай его предпочтения. '
             'Ищи связи по атмосфере, абсурду, юмору, структуре сюжета, режиссуре и темпу, '
             'а не только жанру или популярности. Низкие оценки — значимые отрицательные примеры. '
-            'Предложи 12 реально существующих произведений вне avoid и просмотренного, '
+            'Предложи 30 реально существующих произведений вне avoid и просмотренного, '
             'с разнообразием, без автоматического ограничения рейтингом 7 или годом 1970. '
             'Укажи точные русское и оригинальное названия и год производства. '
             'why — ровно два коротких предложения по-русски, до 450 символов: '
             'почему фильм может подойти этой паре. Не обещай, что точно понравится. '
-            'Не раскрывай чужие оценки, цифры, метки A/B, личные данные и спойлеры; '
+            'not_interested_by — отдельный отказ участника, не факт просмотра и не оценка. '
+            'Учитывай отказы как отрицательные примеры и не предлагай эти произведения повторно. '
+            'Не раскрывай чужие оценки, отказы, цифры, метки A/B, личные данные и спойлеры; '
             'не упоминай отсутствующие предпочтения. Никаких вымышленных ссылок и рейтингов.')
         prompt = instructions + (
             '\nНе используй инструменты, не открывай файлы и не выполняй команды. '
             'Верни только JSON по заданной схеме.\nДанные:\n') + json.dumps(
-                {'watched': profile, 'avoid': avoid}, ensure_ascii=False)
+                {'taste_history': profile, 'avoid': avoid}, ensure_ascii=False)
         response = self.ask(prompt, 'recommendations.schema.json', MODEL, 'medium')
         try:
             items = response['recommendations']
-            if not isinstance(items, list) or not 1 <= len(items) <= 12:
+            if not isinstance(items, list) or not 1 <= len(items) <= 30:
                 raise ValueError()
             for item in items:
                 if (not isinstance(item, dict) or type(item.get('year')) is not int
@@ -100,6 +103,9 @@ class SolRecommender:
         self.path = str(path)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='chekino-sol')
         self.future = None
+        self.retry_after = 0
+        self.last_error = None
+        self.warming = True
         self.db = sqlite3.connect(path, isolation_level=None, timeout=10)
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''
@@ -109,6 +115,10 @@ class SolRecommender:
           batch INTEGER NOT NULL, position INTEGER NOT NULL, movie TEXT,
           PRIMARY KEY(batch,position));
         CREATE TABLE IF NOT EXISTS attempts (at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS reserve_pool (
+          movie INTEGER PRIMARY KEY, profile TEXT NOT NULL, data TEXT NOT NULL,
+          created REAL NOT NULL);
+
         ''')
 
     def context(self):
@@ -120,6 +130,11 @@ class SolRecommender:
             if votes:
                 profile.append(names | {'ratings': {
                     label: votes[uid] for label, uid in zip(('A', 'B'), self.users) if uid in votes}})
+        for row in self.store.db.execute('SELECT movie,data,user FROM rejections ORDER BY movie,user'):
+            if row['user'] in self.users:
+                profile.append(json.loads(row['data']) | {'not_interested_by': [
+                    'A' if row['user'] == self.users[0] else 'B']})
+                avoid.append(json.loads(row['data']))
         # IDs, names, chat state and other private configuration never enter this payload.
         fingerprint = hashlib.sha256(json.dumps(
             [MODEL, PROMPT_VERSION, profile], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
@@ -142,10 +157,11 @@ class SolRecommender:
     def comparable(title):
         return re.sub(r'[^\w]', '', title.casefold().replace('ё', 'е'))
 
-    def resolve(self, suggestion):
+    def resolve(self, suggestion, metadata=None):
+        metadata = metadata or self.metadata
         expected = {self.comparable(suggestion[k]) for k in ('title', 'original_title')}
         for title in dict.fromkeys((suggestion['original_title'], suggestion['title'])):
-            response = self.metadata.get('', keyword=title, yearFrom=suggestion['year'],
+            response = metadata.get('', keyword=title, yearFrom=suggestion['year'],
                                          yearTo=suggestion['year'], page=1)
             matches = []
             for raw in response.get('items', []):
@@ -156,57 +172,89 @@ class SolRecommender:
                     matches.append(raw)
             mids = {m['kinopoiskId'] for m in matches}
             if len(mids) == 1:
-                movie = self.metadata.detail(mids.pop())
+                movie = metadata.detail(mids.pop())
                 return movie | {'why': suggestion['why'], 'recommendation_model': MODEL}
         return None  # Ambiguous/nonexistent works are not silently mapped to another film.
 
-    def from_batch(self, batch, excluded):
-        any_verified = False
-        for index, suggestion in enumerate(json.loads(batch['suggestions'])):
-            row = self.db.execute('SELECT movie FROM resolved WHERE batch=? AND position=?',
-                                  (batch['id'], index)).fetchone()
-            if row:
-                movie = json.loads(row['movie']) if row['movie'] else None
-            else:
-                movie = self.resolve(suggestion)
-                self.db.execute('INSERT INTO resolved VALUES(?,?,?)',
-                                (batch['id'], index, json.dumps(movie, ensure_ascii=False) if movie else None))
-            if movie:
-                any_verified = True
-                if movie['id'] not in excluded:
-                    return movie
-        if not any_verified:
-            raise RecommendationError('Не удалось проверить подборку Sol в Кинопоиске.')
-        return None
+    def available(self, excluded=None):
+        excluded = (excluded or set()) | self.store.catalog() | self.store.seen() | self.store.rejected() | self.store.active_recommendations()
+        fingerprint = self.context()[0]
+        return [json.loads(row['data']) for row in self.db.execute(
+            'SELECT * FROM reserve_pool ORDER BY (profile=?) DESC,created,movie', (fingerprint,))
+                if row['movie'] not in excluded]
 
-    def generate_and_save(self, fingerprint, profile, avoid):
+    def generate_and_save(self, fingerprint, profile, avoid, watched):
         suggestions = self.client.generate(profile, avoid)
-        # A separate connection commits the batch even if the input transaction later fails.
-        with sqlite3.connect(self.path, timeout=10) as db:
-            db.execute('INSERT INTO batches(profile,suggestions) VALUES(?,?)',
-                       (fingerprint, json.dumps(suggestions, ensure_ascii=False)))
+        metadata = self.metadata.fork(watched) if hasattr(self.metadata, 'fork') else self.metadata
+        try:
+            with sqlite3.connect(self.path, timeout=10) as db:
+                batch_id = db.execute('INSERT INTO batches(profile,suggestions) VALUES(?,?)',
+                                      (fingerprint, json.dumps(suggestions, ensure_ascii=False))).lastrowid
+            for index, suggestion in enumerate(suggestions):
+                movie = self.resolve(suggestion, metadata)
+                with sqlite3.connect(self.path, timeout=10) as db:
+                    db.execute('INSERT INTO resolved VALUES(?,?,?)',
+                               (batch_id, index, json.dumps(movie, ensure_ascii=False) if movie else None))
+                    if movie:
+                        db.execute('INSERT OR REPLACE INTO reserve_pool VALUES(?,?,?,?)',
+                                   (movie['id'], fingerprint, json.dumps(movie, ensure_ascii=False), time.time()))
+        finally:
+            if metadata is not self.metadata and metadata.cache:
+                metadata.cache.db.close()
 
-    def recommend(self, excluded, preferences=None):
+    def reap(self):
         if self.future and self.future.done():
             completed, self.future = self.future, None
-            completed.result()
+            try:
+                completed.result()
+                self.last_error = None
+                # Prevent immediate repeated generation if an unhelpful batch yielded few new titles.
+                self.retry_after = time.time() + 30
+            except (RecommendationError, ApiError) as exc:
+                self.last_error = str(exc) if isinstance(exc, RecommendationError) else 'Кинопоиск сейчас недоступен.'
+                self.retry_after = time.time() + 300
+
+    def maintain(self):
+        self.reap()
+        ready = len(self.available())
+        if ready >= 50:
+            self.warming = False
+        elif ready < 30:
+            self.warming = True
+        if self.future or time.time() < self.retry_after or not self.warming:
+            return
         fingerprint, profile, avoid = self.context()
-        for batch in self.db.execute('SELECT * FROM batches WHERE profile=? ORDER BY id DESC',
-                                     (fingerprint,)).fetchall():
-            movie = self.from_batch(batch, excluded)
-            if movie:
-                return movie
-        if self.future:
-            raise RecommendationPending()
-        seen_names = set()
+        known = set()
+        for row in self.db.execute('SELECT data FROM reserve_pool'):
+            movie = json.loads(row['data'])
+            avoid.append({'title': movie['title'], 'year': movie['year']})
+            known.add(movie['id'])
+        # Include old shown picks whose temporary metadata has already been pruned.
         for row in self.db.execute('SELECT movie FROM resolved WHERE movie IS NOT NULL'):
             movie = json.loads(row['movie'])
-            if movie['id'] in excluded and movie['id'] not in seen_names:
+            if movie['id'] in self.store.seen() and movie['id'] not in known:
                 avoid.append({'title': movie['title'], 'year': movie['year']})
-                seen_names.add(movie['id'])
-        self.reserve()
-        self.future = self.executor.submit(self.generate_and_save, fingerprint, profile, avoid)
-        raise RecommendationPending()
+                known.add(movie['id'])
+        try:
+            self.reserve()
+        except RecommendationError as exc:
+            self.last_error = str(exc)
+            self.retry_after = time.time() + 300
+            return
+        self.future = self.executor.submit(self.generate_and_save, fingerprint, profile, avoid, self.store.watched())
+
+    def recommend_many(self, excluded, count=5):
+        self.reap()
+        ready = self.available(excluded)
+        if len(ready) >= count or (ready and not self.future):
+            return ready[:count]
+        self.maintain()
+        if self.future:
+            raise RecommendationPending()
+        raise RecommendationError(self.last_error or 'Готовый запас пополняется. Попробуй чуть позже.')
+
+    def recommend(self, excluded, preferences=None):
+        return self.recommend_many(excluded, 1)[0]
 
     def pending(self):
-        return bool(self.future and not self.future.done())
+        return bool(self.future and not self.future.done() and len(self.available()) < 5)

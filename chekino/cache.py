@@ -10,6 +10,7 @@ class MetadataCache:
     def __init__(self, path, budget=400, max_bytes=1024**3, watched=None):
         if max_bytes < 65536:
             raise ValueError('Cache size must be at least 64 KiB')
+        self.path = str(path)
         self.db = sqlite3.connect(path, isolation_level=None, timeout=10)
         self.budget, self.max_bytes = budget, max_bytes
         self.watched = watched or (lambda: set())

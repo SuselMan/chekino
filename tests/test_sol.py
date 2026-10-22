@@ -141,6 +141,86 @@ class SolTests(unittest.TestCase):
         with patch.object(self.metadata, 'get', return_value={'items': [raw, raw | {'kinopoiskId': 11}]}):
             self.assertIsNone(self.rec.resolve(suggestion(2)))
 
+    def seed_reserve(self, count=60):
+        profile = self.rec.context()[0]
+        for mid in range(100, 100 + count):
+            data = movie(mid, why='Первая причина. Вторая причина.')
+            self.rec.db.execute('INSERT INTO reserve_pool VALUES(?,?,?,?)',
+                                (mid, profile, json.dumps(data), mid))
+
+    def test_five_ready_cards_need_no_model_or_metadata_calls(self):
+        self.seed_reserve()
+        with patch.object(self.metadata, 'get', side_effect=AssertionError('network')), \
+                patch.object(self.metadata, 'detail', side_effect=AssertionError('network')):
+            state = self.app.recommend(111222333, {})
+        self.assertEqual(len(state['rec_batch']), 5)
+        self.assertEqual(len(self.rec.available()), 59)  # First displayed item is marked seen.
+        self.s.set_state(111222333, state)
+        self.assertEqual(len(self.rec.available()), 55)  # Remaining four are reserved to this chat.
+        self.assertEqual(len(self.client.calls), 0)
+        self.assertEqual(self.s.catalog(), {1})
+        self.assertEqual(self.app.visible_ids(111222333, state), state['rec_batch'])
+
+    def test_not_interested_is_permanent_feedback_not_a_rating(self):
+        self.seed_reserve()
+        state = self.app.recommend(111222333, {})
+        self.s.set_state(111222333, state)
+        mid = state['mid']
+        before_votes = dict(self.s.votes(1))
+        following = self.app.action(111222333, state, 'reject')
+        self.s.set_state(111222333, following)
+        self.assertIn(mid, self.s.rejected())
+        self.assertNotIn(mid, self.s.catalog())
+        self.assertEqual(self.s.votes(mid), {})
+        self.assertNotIn(mid, self.s.watched())
+        self.assertEqual(self.s.votes(1), before_votes)
+        self.assertNotIn(mid, [m['id'] for m in self.rec.available()])
+        _, profile, avoid = self.rec.context()
+        feedback = [e for e in profile if e.get('not_interested_by')]
+        self.assertEqual(feedback[0]['not_interested_by'], ['A'])
+        self.assertEqual(feedback[0]['title'], movie(mid)['title'])
+        self.assertIn({'title': movie(mid)['title'], 'year': 2000}, avoid)
+        self.assertNotIn(str(111222333), json.dumps(profile))
+
+    def test_reject_advances_to_unseen_card_instead_of_repeating_first(self):
+        self.seed_reserve()
+        state = self.app.recommend(111222333, {})
+        self.s.set_state(111222333, state)
+        second = self.app.action(111222333, state, 'page', '1')
+        self.s.set_state(111222333, second)
+        following = self.app.action(111222333, second, 'reject')
+        self.assertEqual(following['mid'], state['rec_batch'][2])
+        self.assertNotIn(state['mid'], following['rec_batch'])
+
+    def test_consumed_batch_never_renders_empty_telegram_text(self):
+        self.seed_reserve()
+        state = self.app.recommend(111222333, {})
+        self.s.set_state(111222333, state)
+        for mid in state['rec_batch']:
+            self.s.add(mid)
+        self.assertTrue(self.app.render(111222333)['text'].strip())
+
+    def test_buffer_refills_below_thirty_and_survives_restart(self):
+        self.seed_reserve(50)
+        self.rec.maintain()
+        self.assertIsNone(self.rec.future)
+        self.assertFalse(self.rec.warming)
+        excluded = set(range(100, 121))
+        for mid in excluded:
+            self.s.record_recommendation(111222333, mid)
+        self.assertEqual(len(self.rec.available()), 29)
+        self.rec.maintain()
+        self.assertIsNotNone(self.rec.future)
+        self.rec.future.result(timeout=2)
+        restarted = SolRecommender(self.s, self.metadata, self.client, self.rec.users, self.path)
+        try:
+            self.assertGreaterEqual(len(restarted.available()), 29)
+            offered = restarted.recommend_many(set(), 5)
+            self.assertFalse({m['id'] for m in offered} & excluded)
+        finally:
+            restarted.executor.shutdown(wait=True)
+            restarted.db.close()
+
     def test_codex_client_pins_sol_and_only_parses_final_message(self):
         events = '\n'.join(json.dumps(e) for e in [
             {'type': 'item.completed', 'item': {'type': 'reasoning', 'text': 'not a result'}},
@@ -156,8 +236,8 @@ class SolTests(unittest.TestCase):
         self.assertIn('--ephemeral', command)
         self.assertIn('read-only', command)
         self.assertIn('features.shell_tool=false', command)
-        self.assertIn('watched', kwargs['input'])
-        self.assertNotIn('watched', ' '.join(command), 'private prompt belongs on stdin')
+        self.assertIn('taste_history', kwargs['input'])
+        self.assertNotIn('taste_history', ' '.join(command), 'private prompt belongs on stdin')
 
     def test_client_errors_do_not_echo_private_output(self):
         failed = subprocess.CompletedProcess([], 1, 'private ratings', 'private secret')

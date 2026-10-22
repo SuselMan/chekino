@@ -17,18 +17,22 @@ class App:
         self.recommender, self.normalizer = recommender, normalizer
 
     def recommend(self, uid, state):
-        excluded = self.s.catalog() | self.s.recently_shown(uid)
+        excluded = self.s.catalog() | self.s.seen() | self.s.rejected()
         try:
-            movie = (self.recommender.recommend(excluded) if self.recommender else
-                     self.provider.recommend(excluded, self.s.preferences(self.users)))
+            if self.recommender:
+                movies = self.recommender.recommend_many(excluded, 5)
+            else:
+                movie = self.provider.recommend(excluded, self.s.preferences(self.users))
+                movies = [movie] if movie else []
         except RecommendationPending:
             return {'mode': 'new', 'ai_pending': True,
-                    'notice': 'Sol подбирает фильмы по вашим оценкам. Карточка обновится сама.'}
-        if movie is None:
-            return {'mode': 'new', 'notice': 'Новых рекомендаций сейчас нет. Попробуй позже.'}
-        self.s.cache(movie)
-        self.s.record_recommendation(uid, movie['id'])
-        return {'mode': 'new', 'mid': movie['id']}
+                    'notice': 'Sol готовит запас рекомендаций. Первые варианты появятся автоматически.'}
+        if not movies:
+            return {'mode': 'new', 'notice': 'Запас рекомендаций пополняется. Попробуй чуть позже.'}
+        for movie in movies:
+            self.s.cache(movie)
+        self.s.record_recommendation(uid, movies[0]['id'])
+        return {'mode': 'new', 'mid': movies[0]['id'], 'rec_batch': [m['id'] for m in movies]}
 
     def refresh_recommendations(self):
         if not self.recommender or self.recommender.pending():
@@ -113,6 +117,8 @@ class App:
             mid = ids[(pos + int(argument)) % len(ids)]
             if state['mode'] == 'search':
                 self.s.cache(self.provider.detail(mid))
+            elif state['mode'] == 'new':
+                self.s.record_recommendation(uid, mid)
             return {**state, 'mid': mid}
         if action == 'choose':
             mid = int(argument)
@@ -125,6 +131,15 @@ class App:
         mid = state.get('mid')
         if not mid or not self.s.movie(mid):
             raise ValueError('Карточка устарела. Открой /queue.')
+        if action == 'reject' and state.get('mode') == 'new':
+            self.s.reject(uid, mid)
+            remaining = [m for m in self.visible_ids(uid, state)
+                         if m != mid and m not in self.s.seen()]
+            if not remaining:
+                return self.recommend(uid, {})
+            next_mid = remaining[0]
+            self.s.record_recommendation(uid, next_mid)
+            return {**state, 'mid': next_mid, 'rec_batch': remaining}
         if action == 'add':
             self.s.add(mid)
             return {'mode': 'detail', 'mid': mid}
@@ -136,6 +151,10 @@ class App:
     def visible_ids(self, uid, state):
         if state['mode'] == 'search':
             return state.get('choices', [])
+        if state['mode'] == 'new':
+            excluded = self.s.catalog() | self.s.rejected()
+            return [mid for mid in state.get('rec_batch', [state.get('mid')])
+                    if mid and mid not in excluded]
         return self.s.ids(state['mode'], uid)
 
     def handle(self, update):
@@ -228,11 +247,13 @@ class App:
             lines.append(html.escape(state['notice']))
         mode = state['mode']
         mid = state.get('mid')
-        if mode in {'queue', 'rate', 'search'}:
+        if mode in {'queue', 'rate', 'search', 'new'}:
             ids = self.visible_ids(uid, state)
             mid = mid if mid in ids else (ids[0] if ids else None)
             if mid != state.get('mid'):
                 state = {**state, 'mid': mid}
+                if mode == 'new' and mid:
+                    self.s.record_recommendation(uid, mid)
                 self.s.db.execute('UPDATE users SET state=? WHERE id=?',
                                   (json.dumps(state, ensure_ascii=False), uid))
             if mid:
@@ -242,7 +263,7 @@ class App:
             else:
                 lines.append({'queue': 'Очередь пуста. Пришли название или открой /new.',
                               'rate': 'Все просмотренные фильмы оценены.',
-                              'search': ''}[mode])
+                              'search': '', 'new': 'В этой подборке больше нет доступных фильмов. Открой «Новое».'}[mode])
         if mid:
             movie = self.s.movie(mid)
             votes = self.s.votes(mid)
@@ -273,7 +294,8 @@ class App:
             if mid not in self.s.catalog():
                 actions.append(b('В очередь', f'choose:{mid}' if mode == 'search' else 'add'))
             if mode == 'new':
-                actions.append(b('Ещё', 'new'))
+                actions.append(b('Не интересно', 'reject'))
+                actions.append(b('Следующие 5', 'new'))
             if actions:
                 rows.append(actions)
         pending = len(self.s.ids('rate', uid))

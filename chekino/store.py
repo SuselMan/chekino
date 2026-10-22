@@ -28,6 +28,13 @@ class Store:
         CREATE TABLE IF NOT EXISTS recommendations (
           user INTEGER NOT NULL, movie INTEGER NOT NULL,
           shown INTEGER PRIMARY KEY AUTOINCREMENT);
+        CREATE TABLE IF NOT EXISTS recommendation_seen (
+          user INTEGER NOT NULL, movie INTEGER NOT NULL, PRIMARY KEY(user,movie));
+        INSERT OR IGNORE INTO recommendation_seen(user,movie)
+          SELECT user,movie FROM recommendations;
+        CREATE TABLE IF NOT EXISTS rejections (
+          user INTEGER NOT NULL, movie INTEGER NOT NULL, data TEXT NOT NULL,
+          created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(user,movie));
         CREATE TABLE IF NOT EXISTS deletions (
           chat INTEGER NOT NULL, message INTEGER NOT NULL, PRIMARY KEY(chat,message));
         PRAGMA user_version=1;
@@ -68,6 +75,7 @@ class Store:
             if state.get('mid'):
                 keep.add(state['mid'])
             keep.update(state.get('choices', []))
+            keep.update(state.get('rec_batch', []))
         for row in self.db.execute('SELECT id FROM movies WHERE added=0').fetchall():
             if row[0] not in keep:
                 self.db.execute('DELETE FROM movies WHERE id=? AND added=0', (row[0],))
@@ -122,11 +130,37 @@ class Store:
             result[uid] = {g: sum(v) / len(v) for g, v in totals.items()}
         return result
 
+    def seen(self):
+        return {r[0] for r in self.db.execute('SELECT DISTINCT movie FROM recommendation_seen')}
+
+    def rejected(self):
+        return {r[0] for r in self.db.execute('SELECT DISTINCT movie FROM rejections')}
+
+    def reject(self, uid, mid):
+        movie = self.movie(mid)
+        if not movie:
+            raise ValueError('Карточка устарела. Открой /new.')
+        data = json.dumps({'title': movie['title'], 'year': movie['year']}, ensure_ascii=False)
+        self.db.execute('INSERT OR IGNORE INTO rejections(user,movie,data) VALUES(?,?,?)',
+                        (uid, mid, data))
+        self.invalidate()
+
+    def active_recommendations(self):
+        result = set()
+        for row in self.db.execute('SELECT state FROM users'):
+            state = json.loads(row[0])
+            if state.get('mode') == 'new':
+                result.update(state.get('rec_batch', []))
+                if state.get('mid'):
+                    result.add(state['mid'])
+        return result
+
     def recently_shown(self, uid):
         return {r[0] for r in self.db.execute(
             'SELECT movie FROM recommendations WHERE user=? ORDER BY shown DESC LIMIT 200', (uid,))}
 
     def record_recommendation(self, uid, mid):
+        self.db.execute('INSERT OR IGNORE INTO recommendation_seen VALUES(?,?)', (uid, mid))
         self.db.execute('INSERT INTO recommendations(user,movie) VALUES(?,?)', (uid, mid))
         self.db.execute("""DELETE FROM recommendations WHERE user=? AND shown NOT IN
           (SELECT shown FROM recommendations WHERE user=? ORDER BY shown DESC LIMIT 200)""", (uid, uid))

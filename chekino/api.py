@@ -73,6 +73,13 @@ class Kinopoisk:
     def __init__(self, key, cache=None):
         self.key, self.cache = key, cache
 
+    def fork(self, watched):
+        # Called inside the worker: every SQLite connection belongs to its own thread.
+        from .cache import MetadataCache
+        cache = MetadataCache(self.cache.path, budget=self.cache.budget,
+                              max_bytes=self.cache.max_bytes, watched=lambda: watched) if self.cache else None
+        return Kinopoisk(self.key, cache)
+
     def get(self, path, **params):
         url = 'https://kinopoiskapiunofficial.tech/api/v2.2/films' + path
         if params:
