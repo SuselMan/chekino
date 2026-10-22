@@ -78,7 +78,7 @@ class App:
                         raise RecommendationError('Не нашёл точное произведение. Уточни название или пришли ссылку.')
                     for movie in movies:
                         self.s.cache(movie)
-                    state = self.search_state(movies, 'Нашёл варианты. Листай и выбери нужный фильм.')
+                    state = self.search_state(movies, 'Нашёл варианты. Листай и выбери нужный фильм.', complete=True)
                     self.s.db.execute('INSERT OR IGNORE INTO deletions VALUES(?,?)',
                                       (uid, previous['input_message']))
                 except RecommendationPending:
@@ -93,8 +93,8 @@ class App:
 
         return verification_started
 
-    def search_state(self, movies, notice=None):
-        first = self.provider.detail(movies[0]['id'])
+    def search_state(self, movies, notice=None, complete=False):
+        first = movies[0] if complete else self.provider.detail(movies[0]['id'])
         self.s.cache(first)
         return {'mode': 'search', 'choices': [m['id'] for m in movies],
                 'mid': first['id'], **({'notice': notice} if notice else {})}
@@ -178,6 +178,7 @@ class App:
                 parts = cb.get('data', '').split(':')
                 if (not user or user['dirty'] or msg.get('message_id') != user['message']
                         or len(parts) not in (2, 3) or parts[0] != str(user['revision'])):
+                    print('Отклонена устаревшая кнопка; обновляю карточку.', flush=True)
                     # Never retarget an old button to a different film.
                     if user:
                         self.s.db.execute('UPDATE users SET dirty=1 WHERE id=?', (actor,))
@@ -307,9 +308,10 @@ class App:
                                               'show_above_text': True} if poster else {'is_disabled': True})}
         return payload
 
-    def deliver(self):
+    def deliver(self, priority=None):
         """Retry UI before deleting input. Missing cards are recreated only on confirmed 400."""
-        for row in self.s.db.execute('SELECT id FROM users WHERE dirty=1').fetchall():
+        for row in self.s.db.execute(
+                'SELECT id FROM users WHERE dirty=1 ORDER BY (id=?) DESC', (priority,)).fetchall():
             uid = row[0]
             if uid not in self.users:
                 continue

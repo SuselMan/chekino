@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 from chekino.app import App
@@ -121,6 +122,31 @@ class LookupTests(unittest.TestCase):
         self.app.refresh_lookups()
         self.app.refresh_lookups()
         self.assertEqual(self.s.user(11)['state'], {'mode': 'queue'})
+
+    def test_slow_metadata_does_not_block_rating_or_navigation(self):
+        entered, release = threading.Event(), threading.Event()
+        original = self.metadata.get
+        def slow_get(*args, **kwargs):
+            entered.set()
+            if not release.wait(3):
+                raise RuntimeError('worker not released')
+            return original(*args, **kwargs)
+        self.metadata.get = slow_get
+        try:
+            self.app.handle(self.message())
+            self.assertTrue(entered.wait(2))
+            self.app.refresh_lookups()
+            self.assertTrue(self.s.user(11)['state']['lookup_pending'])
+            self.s.cache(movie(7))
+            self.s.add(7)
+            state = self.app.action(22, {'mode': 'detail', 'mid': 7}, 'vote', '4')
+            self.s.set_state(22, state)
+            self.app.deliver(priority=22)
+            self.assertEqual(self.s.votes(7), {22: 4})
+            self.assertEqual(self.tg.calls[0][1]['chat_id'], 22)
+        finally:
+            release.set()
+        next(iter(self.lookup.jobs.values())).result(timeout=2)
 
     def test_luna_client_pins_cheaper_model_without_sending_ratings(self):
         event = {'type': 'item.completed', 'item': {'type': 'agent_message',

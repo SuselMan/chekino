@@ -39,6 +39,7 @@ class TitleLookup:
         self.db.executescript('''
         CREATE TABLE IF NOT EXISTS lookups (query TEXT PRIMARY KEY, result TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS lookup_attempts (at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS lookup_cards (query TEXT PRIMARY KEY, result TEXT NOT NULL);
         ''')
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='chekino-luna')
         self.jobs = {}
@@ -48,11 +49,23 @@ class TitleLookup:
         normalized = ' '.join(query.casefold().split())
         return hashlib.sha256(normalized.encode()).hexdigest()
 
-    def generate_and_save(self, key, query):
-        result = self.client.normalize(query)
+    def generate_and_save(self, key, query, watched):
+        # Both model and metadata work stay off the Telegram event loop.
+        with sqlite3.connect(self.path, timeout=10) as db:
+            row = db.execute('SELECT result FROM lookups WHERE query=?', (key,)).fetchone()
+        result = json.loads(row[0]) if row else self.client.normalize(query)
         with sqlite3.connect(self.path, timeout=10) as db:
             db.execute('INSERT OR REPLACE INTO lookups VALUES(?,?)',
                        (key, json.dumps(result, ensure_ascii=False)))
+        metadata = self.metadata.fork(watched) if hasattr(self.metadata, 'fork') else self.metadata
+        try:
+            movies = self.verify(result, metadata)
+            with sqlite3.connect(self.path, timeout=10) as db:
+                db.execute('INSERT OR REPLACE INTO lookup_cards VALUES(?,?)',
+                           (key, json.dumps(movies, ensure_ascii=False)))
+        finally:
+            if metadata is not self.metadata and metadata.cache:
+                metadata.cache.db.close()
 
     def reserve(self):
         self.db.execute('BEGIN IMMEDIATE')
@@ -80,30 +93,34 @@ class TitleLookup:
         if future and future.done():
             del self.jobs[key]
             future.result()
-        row = self.db.execute('SELECT result FROM lookups WHERE query=?', (key,)).fetchone()
+        row = self.db.execute('SELECT result FROM lookup_cards WHERE query=?', (key,)).fetchone()
         if not row:
             if key not in self.jobs:
                 if sum(not f.done() for f in self.jobs.values()) >= 2:
                     raise RecommendationError('Luna уже уточняет другие названия. Повтори чуть позже.')
                 self.reserve()
-                self.jobs[key] = self.executor.submit(self.generate_and_save, key, query[:1000])
+                watched = self.metadata.cache.watched() if getattr(self.metadata, 'cache', None) else set()
+                self.jobs[key] = self.executor.submit(self.generate_and_save, key, query[:1000], watched)
             raise RecommendationPending()
+        return json.loads(row[0])
+
+    def verify(self, suggestions, metadata):
         movies = {}
-        for suggestion in json.loads(row[0]):
+        for suggestion in suggestions:
             expected = {SolRecommender.comparable(suggestion[k]) for k in ('title', 'original_title')}
             for title in dict.fromkeys((suggestion['original_title'], suggestion['title'])):
                 found = False
                 params = {'keyword': title, 'page': 1}
                 if suggestion.get('year'):
                     params.update(yearFrom=suggestion['year'] - 1, yearTo=suggestion['year'] + 1)
-                for raw in self.metadata.get('', **params).get('items', []):
+                for raw in metadata.get('', **params).get('items', []):
                     names = {SolRecommender.comparable(raw.get(k) or '')
                              for k in ('nameRu', 'nameOriginal', 'nameEn')}
                     if (names & expected and raw.get('type') in {'FILM', 'TV_SERIES', 'MINI_SERIES'}
                             and (not suggestion.get('year') or
                                  str(raw.get('year')) in {str(suggestion['year'] + d) for d in (-1, 0, 1)})):
                         movie = normalize(raw)
-                        movies[movie['id']] = movie
+                        movies[movie['id']] = metadata.detail(movie['id'])
                         found = True
                 if found:
                     break

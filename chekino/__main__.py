@@ -107,21 +107,26 @@ def main():
                 updates = tg.call('getUpdates', offset=store.offset(), timeout=2 if waiting or recommender.future else 25,
                                   allowed_updates=['message', 'callback_query'])
                 for update in updates:
-                    try:
-                        app.handle(update)
-                    except ValueError as exc:
-                        app.error(update, str(exc))
-                    except ApiError:
-                        app.error(update, 'Источник метаданных недоступен. Ввод сохранён; повтори позже.')
+                    started = time.monotonic()
                     cb = update.get('callback_query')
                     if cb:
                         try:
                             tg.call('answerCallbackQuery', callback_query_id=cb['id'])
                         except ApiError:
                             pass
-                    app.deliver()
+                    try:
+                        app.handle(update)
+                    except ValueError as exc:
+                        app.error(update, str(exc))
+                    except ApiError:
+                        app.error(update, 'Источник метаданных недоступен. Ввод сохранён; повтори позже.')
+                    actor = (cb or update.get('message') or {}).get('from', {}).get('id')
+                    app.deliver(priority=actor)
+                    print(f'Обработка {"кнопки" if cb else "сообщения"}: '
+                          f'{time.monotonic() - started:.3f}s', flush=True)
             except ApiError as exc:
-                print('Временная ошибка API; повтор с сохранённым состоянием.', flush=True)
+                print(f'Временная ошибка API: код={exc.code}, retry_after={exc.retry_after}; '
+                      'повтор с сохранённым состоянием.', flush=True)
                 time.sleep(min(60, max(3, exc.retry_after)))
             except (sqlite3.Error, OSError):
                 # Fail visibly; systemd may restart, durable updates stay in SQLite.

@@ -1,6 +1,7 @@
 import json
 import random
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,7 +36,14 @@ class Telegram:
         self.base = 'https://api.telegram.org/bot' + token + '/'
 
     def call(self, method, **payload):
-        body = request(self.base + method, payload)
+        started = time.monotonic()
+        try:
+            body = request(self.base + method, payload,
+                           timeout=40 if method == 'getUpdates' else 8)
+        finally:
+            elapsed = time.monotonic() - started
+            if method != 'getUpdates' or elapsed > payload.get('timeout', 0) + 2:
+                print(f'Telegram {method}: {elapsed:.3f}s', flush=True)
         if not body.get('ok'):
             raise ApiError(body.get('error_code', 0), body.get('description', ''),
                            body.get('parameters', {}).get('retry_after', 0))
