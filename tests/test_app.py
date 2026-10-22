@@ -92,7 +92,7 @@ class AppTests(unittest.TestCase):
         payload = self.app.render(11)
         scale = next(row for row in payload['reply_markup']['inline_keyboard']
                      if len(row) == 5)
-        self.assertEqual([b['text'] for b in scale], ['1', '2', '3', '4', '5'])
+        self.assertEqual([b['text'] for b in scale], ['⭐ 1', '⭐ 2', '⭐ 3', '⭐ 4', '⭐ 5'])
         self.assertEqual(self.s.ids('queue', 22), [1], 'displaying the scale must not mark watched')
         update = self.callback('vote:5')
         self.assertEqual(self.s.ids('queue', 11), [])
@@ -146,6 +146,39 @@ class AppTests(unittest.TestCase):
                 self.assertEqual(restored.ids('queue', 11), [])
             finally:
                 restored.db.close()
+
+    def test_archive_browsing_and_restore_are_shared(self):
+        for mid in (1, 2):
+            self.p.results = [movie(mid)]
+            self.message(f'https://kinopoisk.ru/film/{mid}/')
+            self.callback('archive')
+        self.message('/archive')
+        self.assertEqual(self.s.user(11)['state']['mode'], 'archive')
+        self.assertEqual(self.s.user(11)['state']['mid'], 1)
+        card = self.app.render(11)
+        self.assertIn('↩️ Вернуть в очередь', str(card['reply_markup']))
+        self.assertFalse(any(len(row) == 5 for row in card['reply_markup']['inline_keyboard']))
+        self.callback('page:1')
+        self.assertEqual(self.s.user(11)['state']['mid'], 2)
+        self.callback('restore')
+        self.assertFalse(self.s.archived(2))
+        self.assertEqual(self.s.ids('queue', 11), [2])
+        self.assertEqual(self.s.ids('queue', 22), [2])
+        self.assertEqual(self.s.ids('archive', 11), [1])
+        self.assertEqual(self.s.votes(2), {})
+        self.callback('restore')
+        self.assertIn('Архив пуст', self.app.render(11)['text'])
+        self.assertEqual(self.s.ids('queue', 11), [1, 2])
+
+    def test_card_shows_external_ratings_without_api_and_handles_missing(self):
+        self.message('https://kinopoisk.ru/film/1/')
+        self.s.cache(movie(1, rating_kp=7.4, rating_imdb=8.1))
+        self.p.fail = True
+        self.assertIn('Кинопоиск: 7.4/10 · IMDb: 8.1/10', self.app.render(11)['text'])
+        self.s.cache(movie(1))
+        self.assertIn('IMDb: 8.1/10', self.app.render(11)['text'])
+        self.s.cache(movie(1, rating_kp=None, rating_imdb=None))
+        self.assertIn('Кинопоиск: — · IMDb: —', self.app.render(11)['text'])
 
     def test_watched_movie_cannot_be_archived(self):
         self.message('https://kinopoisk.ru/film/1/')

@@ -1,6 +1,7 @@
 import json
 import http.client
 import socket
+import threading
 from concurrent.futures import ThreadPoolExecutor
 import random
 import re
@@ -40,19 +41,12 @@ class IPv4HTTPSConnection(http.client.HTTPSConnection):
         self._create_connection = ipv4_connection
 
 
-class IPv4HTTPSHandler(urllib.request.HTTPSHandler):
-    def https_open(self, req):
-        return self.do_open(IPv4HTTPSConnection, req, context=self._context)
-
-
-TELEGRAM_OPENER = urllib.request.build_opener(IPv4HTTPSHandler())
-
-def request(url, payload=None, headers=None, timeout=40, ipv4=False):
+def request(url, payload=None, headers=None, timeout=40):
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(url, data=data,
                                  headers={'Content-Type': 'application/json', **(headers or {})})
     try:
-        with (TELEGRAM_OPENER.open if ipv4 else urllib.request.urlopen)(req, timeout=timeout) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         try:
@@ -68,13 +62,46 @@ def request(url, payload=None, headers=None, timeout=40, ipv4=False):
 class Telegram:
     def __init__(self, token):
         self.base = 'https://api.telegram.org/bot' + token + '/'
+        self.connections = threading.local()
+
+    def request(self, method, payload, timeout):
+        connection = getattr(self.connections, 'current', None)
+        if connection is None:
+            connection = IPv4HTTPSConnection('api.telegram.org', timeout=timeout)
+            self.connections.current = connection
+        connection.timeout = timeout
+        if connection.sock:
+            connection.sock.settimeout(timeout)
+        phase = 'send'
+        try:
+            path = urllib.parse.urlsplit(self.base + method).path
+            if method == 'getUpdates':
+                query = {key: json.dumps(value) if isinstance(value, (list, dict)) else value
+                         for key, value in payload.items()}
+                connection.request('GET', path + '?' + urllib.parse.urlencode(query))
+            else:
+                connection.request('POST', path, body=json.dumps(payload).encode(),
+                                   headers={'Content-Type': 'application/json'})
+            phase = 'headers'
+            response = connection.getresponse()
+            phase = 'body'
+            body = json.loads(response.read())
+            if response.status >= 400:
+                raise ApiError(response.status, body.get('description', ''),
+                               body.get('parameters', {}).get('retry_after', 0))
+            return body
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            print(f'Telegram transport {method}: {phase}, {type(exc).__name__}', flush=True)
+            connection.close()
+            self.connections.current = None
+            raise ApiError() from None
 
     def call(self, method, **payload):
         started = time.monotonic()
         try:
-            body = request(self.base + method, payload,
-                           timeout=3 if method == 'getUpdates' else (2 if method == 'answerCallbackQuery' else 8),
-                           ipv4=True)
+            body = self.request(method, payload,
+                                timeout=3 if method == 'getUpdates' else
+                                (2 if method == 'answerCallbackQuery' else 8))
         finally:
             elapsed = time.monotonic() - started
             if method != 'getUpdates' or elapsed > payload.get('timeout', 0) + 2:
@@ -87,14 +114,14 @@ class Telegram:
     def poll(self, offset):
         # Long polling on this VPS intermittently held incoming buttons for 40s.
         try:
-            updates = self.call('getUpdates', offset=offset, timeout=0,
+            updates = self.call('getUpdates', offset=offset, timeout=1,
                                 allowed_updates=['message', 'callback_query'])
         except ApiError as exc:
             print(f'Получение обновлений недоступно: код={exc.code}; повтор.', flush=True)
             time.sleep(min(60, max(0.5, exc.retry_after)))
             return []
         if not updates:
-            time.sleep(0.35)
+            time.sleep(1.0)
         return updates
 
 
@@ -132,6 +159,10 @@ def canonical_id(text):
     return int(match[1])
 
 
+def external_rating(value):
+    return value if type(value) in (int, float) and 0 <= value <= 10 else None
+
+
 def normalize(raw):
     mid = raw.get('kinopoiskId') or raw.get('filmId')
     if not isinstance(mid, int) or mid <= 0:
@@ -141,6 +172,8 @@ def normalize(raw):
         poster = ''
     return {'id': mid, 'title': raw.get('nameRu') or raw.get('nameOriginal')
             or raw.get('nameEn') or 'Без названия', 'year': raw.get('year'),
+            'rating_kp': external_rating(raw.get('ratingKinopoisk')),
+            'rating_imdb': external_rating(raw.get('ratingImdb')),
             'kind': raw.get('type', 'UNKNOWN'), 'description': raw.get('description') or '',
             'poster': poster, 'genres': [g['genre'] for g in raw.get('genres', []) if g.get('genre')]}
 

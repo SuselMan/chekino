@@ -7,6 +7,13 @@ from .sol import RecommendationError, RecommendationPending, SolRecommender
 
 
 def button(text, data):
+    icons = {'Очередь': '🎬', 'Новое': '✨', 'Архив': '🗄️',
+             'В архив': '📦', 'Вернуть в очередь': '↩️', 'В очередь': '➕',
+             'Не интересно': '👎', 'Следующие 5': '➡️'}
+    if text in icons:
+        text = icons[text] + ' ' + text
+    elif text in {'1', '2', '3', '4', '5'}:
+        text = '⭐ ' + text
     return {'text': text, 'callback_data': data}
 
 
@@ -101,6 +108,8 @@ class App:
                 'mid': first['id'], **({'notice': notice} if notice else {})}
 
     def action(self, uid, state, action, argument=''):
+        if action == 'archives':
+            return {'mode': 'archive'}
         if action == 'history':  # Old commands/buttons return to the queue.
             action = 'queue'
         if action in {'queue', 'rate'}:
@@ -141,6 +150,9 @@ class App:
             next_mid = remaining[0]
             self.s.record_recommendation(uid, next_mid)
             return {**state, 'mid': next_mid, 'rec_batch': remaining}
+        if action == 'restore' and state.get('mode') == 'archive':
+            self.s.restore(mid)
+            return {'mode': 'archive'}
         if action == 'archive' and state.get('mode') in {'queue', 'detail'}:
             self.s.archive(mid)
             return {'mode': 'queue'}
@@ -196,9 +208,9 @@ class App:
                 if command in {'/start', '/help'}:
                     state = {'mode': 'queue', 'notice': 'Пришли название или ссылку Кинопоиска. '
                              '/queue — очередь, /new — рекомендации, /random — случайный фильм, '
-                             '/rate — ждут оценки.'}
-                elif command in {'/queue', '/new', '/random', '/rate', '/history'}:
-                    state = self.action(actor, state, command[1:])
+                             '/rate — ждут оценки, /archive — архив.'}
+                elif command in {'/queue', '/new', '/random', '/rate', '/history', '/archive'}:
+                    state = self.action(actor, state, 'archives' if command == '/archive' else command[1:])
                 else:
                     movies = self.provider.search(text)
                     if (self.normalizer and canonical_id(text) is None and not any(
@@ -248,7 +260,7 @@ class App:
     def render(self, uid):
         user = self.s.user(uid)
         state = user['state']
-        if self.s.archived(state.get('mid')):
+        if state.get('mode') != 'archive' and self.s.archived(state.get('mid')):
             state = {'mode': 'queue'}
             self.s.db.execute('UPDATE users SET state=? WHERE id=?',
                               (json.dumps(state), uid))
@@ -260,7 +272,7 @@ class App:
             lines.append(html.escape(state['notice']))
         mode = state['mode']
         mid = state.get('mid')
-        if mode in {'queue', 'rate', 'search', 'new'}:
+        if mode in {'queue', 'rate', 'search', 'new', 'archive'}:
             ids = self.visible_ids(uid, state)
             mid = mid if mid in ids else (ids[0] if ids else None)
             if mid != state.get('mid'):
@@ -276,6 +288,7 @@ class App:
             else:
                 lines.append({'queue': 'Очередь пуста. Пришли название или открой /new.',
                               'rate': 'Все просмотренные фильмы оценены.',
+                              'archive': 'Архив пуст.',
                               'search': '', 'new': 'В этой подборке больше нет доступных фильмов. Открой «Новое».'}[mode])
         if mid:
             movie = self.s.movie(mid)
@@ -285,10 +298,18 @@ class App:
                       f"{movie.get('year') or 'Год неизвестен'} · {kind(movie)}",
                       html.escape(movie['description'][:1200]) or 'Описание недоступно.',
                       f'<a href="https://www.kinopoisk.ru/{"series" if movie["kind"] in {"TV_SERIES", "MINI_SERIES", "TV_SHOW"} else "film"}/{mid}/">Кинопоиск</a>']
+            ratings = []
+            for label, key in (('Кинопоиск', 'rating_kp'), ('IMDb', 'rating_imdb')):
+                value = movie.get(key)
+                ratings.append(f'{label}: {value:g}/10' if type(value) in (int, float)
+                               else f'{label}: —')
+            lines.append(' · '.join(ratings))
             if movie.get('why'):
                 lines.append('<b>Почему вам может понравиться</b>\n' +
                              html.escape(movie['why'][:500]))
-            if votes:
+            if mode == 'archive':
+                lines.append('В архиве')
+            elif votes:
                 lines.append('ПРОСМОТРЕНО' + (' — ждёт твоей оценки' if uid not in votes else ''))
             elif mid in self.s.catalog():
                 lines.append('В общей очереди')
@@ -301,9 +322,12 @@ class App:
                 for other, value in votes.items():
                     if other != uid:
                         lines.append(f'Оценка партнёра: {value} / 5')
-            rows.append([b(f'✓ {n}' if votes.get(uid) == n else str(n), f'vote:{n}')
+            if mode != 'archive':
+                rows.append([b(f'✓ {n}' if votes.get(uid) == n else str(n), f'vote:{n}')
                          for n in range(1, 6)])
             actions = []
+            if mode == 'archive':
+                actions.append(b('Вернуть в очередь', 'restore'))
             if mid not in self.s.catalog():
                 actions.append(b('В очередь', f'choose:{mid}' if mode == 'search' else 'add'))
             if mode == 'new':
@@ -315,7 +339,7 @@ class App:
                 rows.append(actions)
         pending = len(self.s.ids('rate', uid))
         rows += [[b('Очередь', 'queue'), b('Новое', 'new'), b('🎲', 'random')],
-                 [b(f'⭐ Ждут оценки · {pending}', 'rate')]]
+                 [b(f'⭐ Ждут оценки · {pending}', 'rate'), b('Архив', 'archives')]]
         payload = {'text': '\n\n'.join(lines), 'parse_mode': 'HTML',
                    'reply_markup': {'inline_keyboard': rows},
                    'link_preview_options': ({'url': poster, 'prefer_large_media': True,

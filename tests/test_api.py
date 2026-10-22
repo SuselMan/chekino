@@ -47,14 +47,13 @@ class ApiTests(unittest.TestCase):
 
     def test_short_poll_uses_durable_offset_without_long_server_wait(self):
         tg = Telegram('placeholder')
-        with patch('chekino.api.request', return_value={'ok': True, 'result': []}) as http, \
+        with patch.object(tg, 'request', return_value={'ok': True, 'result': []}) as http, \
                 patch('chekino.api.time.sleep') as sleep:
             self.assertEqual(tg.poll(42), [])
         self.assertEqual(http.call_args.args[1]['offset'], 42)
-        self.assertEqual(http.call_args.args[1]['timeout'], 0)
+        self.assertEqual(http.call_args.args[1]['timeout'], 1)
         self.assertEqual(http.call_args.kwargs['timeout'], 3)
-        self.assertTrue(http.call_args.kwargs['ipv4'])
-        sleep.assert_called_once_with(0.35)
+        sleep.assert_called_once_with(1.0)
 
     def test_short_poll_failure_recovers_without_global_backoff(self):
         tg = Telegram('placeholder')
@@ -82,6 +81,33 @@ class ApiTests(unittest.TestCase):
         second.settimeout.assert_called_once_with(3)
         second.close.assert_not_called()
 
+    def test_telegram_reuses_connection_and_discards_broken_connection(self):
+        from unittest.mock import MagicMock
+        first, second = MagicMock(), MagicMock()
+        for connection in (first, second):
+            connection.getresponse.return_value.status = 200
+            connection.getresponse.return_value.read.return_value = b'{"ok":true,"result":[]}'
+        tg = Telegram('placeholder')
+        with patch('chekino.api.IPv4HTTPSConnection', side_effect=[first, second]) as factory:
+            tg.call('getUpdates', offset=1, timeout=0)
+            tg.call('editMessageText', text='test')
+            self.assertEqual(factory.call_count, 1)
+            first.sock.settimeout.assert_called_with(8)
+            first.request.side_effect = OSError()
+            with self.assertRaises(ApiError):
+                tg.call('getUpdates', offset=1, timeout=0)
+            first.close.assert_called_once()
+            tg.call('getUpdates', offset=1, timeout=0)
+            self.assertEqual(factory.call_count, 2)
+
+    def test_external_ratings_normalized_independently_of_personal_votes(self):
+        from chekino.api import normalize
+        result = normalize({'kinopoiskId': 1, 'ratingKinopoisk': 7.8, 'ratingImdb': 8})
+        self.assertEqual((result['rating_kp'], result['rating_imdb']), (7.8, 8))
+        result = normalize({'kinopoiskId': 1, 'ratingKinopoisk': 'missing', 'ratingImdb': 99})
+        self.assertIsNone(result['rating_kp'])
+        self.assertIsNone(result['rating_imdb'])
+
     def test_provider_paths_and_normalization(self):
         with patch('urllib.request.urlopen', return_value=Response({'items': [
                 {'kinopoiskId': 7, 'nameRu': 'Имя', 'type': 'FILM', 'year': 2020,
@@ -98,9 +124,9 @@ class ApiTests(unittest.TestCase):
             api.assert_called_once_with('/7')
 
     def test_telegram_payload_and_redacted_errors(self):
-        with patch('chekino.api.TELEGRAM_OPENER.open', return_value=Response({'ok': True, 'result': []})) as http:
+        with patch.object(Telegram, 'request', return_value={'ok': True, 'result': []}) as http:
             self.assertEqual(Telegram('placeholder').call('getUpdates', offset=2), [])
-            self.assertEqual(json.loads(http.call_args.args[0].data), {'offset': 2})
+            self.assertEqual(http.call_args.args[1], {'offset': 2})
         body = io.BytesIO(b'{"description":"Too Many Requests", "parameters":{"retry_after":7}}')
         failure = urllib.error.HTTPError('https://secret.invalid/token', 429, 'error', {}, body)
         with patch('urllib.request.urlopen', side_effect=failure):

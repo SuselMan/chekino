@@ -64,6 +64,9 @@ class Store:
 
     def cache(self, movie):
         previous = self.movie(movie['id'])
+        if previous:
+            movie = {**{key: previous[key] for key in ('rating_kp', 'rating_imdb')
+                        if key in previous}, **movie}
         if previous and previous.get('why') and not movie.get('why'):
             movie = {**movie, 'why': previous['why']}
         self.db.execute('''INSERT INTO movies(id,data) VALUES(?,?)
@@ -96,6 +99,12 @@ class Store:
         self.db.execute('INSERT OR IGNORE INTO archives(movie) VALUES(?)', (mid,))
         self.invalidate()
 
+    def restore(self, mid):
+        if not self.archived(mid):
+            raise ValueError('Фильм уже не в архиве.')
+        self.db.execute('DELETE FROM archives WHERE movie=?', (mid,))
+        self.invalidate()
+
     def add(self, mid):
         if self.archived(mid):
             raise ValueError('Этот фильм уже в архиве.')
@@ -115,6 +124,9 @@ class Store:
         self.db.execute('UPDATE users SET dirty=1,revision=revision+1')
 
     def ids(self, mode, uid):
+        if mode == 'archive':
+            return [r[0] for r in self.db.execute(
+                'SELECT movie FROM archives ORDER BY created,movie')]
         if mode == 'rate':
             query = '''SELECT id FROM movies WHERE added=1
               AND NOT EXISTS(SELECT 1 FROM archives WHERE movie=id)
