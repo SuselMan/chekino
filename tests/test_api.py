@@ -44,6 +44,28 @@ class ApiTests(unittest.TestCase):
         ack.future.result()
         self.assertEqual(calls, ['answerCallbackQuery', 'editMessageText'])
 
+    def test_short_poll_uses_durable_offset_without_long_server_wait(self):
+        tg = Telegram('placeholder')
+        with patch('chekino.api.request', return_value={'ok': True, 'result': []}) as http, \
+                patch('chekino.api.time.sleep') as sleep:
+            self.assertEqual(tg.poll(42), [])
+        self.assertEqual(http.call_args.args[1]['offset'], 42)
+        self.assertEqual(http.call_args.args[1]['timeout'], 0)
+        self.assertEqual(http.call_args.kwargs['timeout'], 3)
+        sleep.assert_called_once_with(0.35)
+
+    def test_short_poll_failure_recovers_without_global_backoff(self):
+        tg = Telegram('placeholder')
+        with patch.object(tg, 'call', side_effect=[ApiError(), [{'update_id': 42}]]), \
+                patch('chekino.api.time.sleep') as sleep:
+            self.assertEqual(tg.poll(42), [])
+            self.assertEqual(tg.poll(42), [{'update_id': 42}])
+        sleep.assert_called_once_with(0.5)
+        with patch.object(tg, 'call', side_effect=ApiError(429, retry_after=7)), \
+                patch('chekino.api.time.sleep') as sleep:
+            tg.poll(42)
+        sleep.assert_called_once_with(7)
+
     def test_provider_paths_and_normalization(self):
         with patch('urllib.request.urlopen', return_value=Response({'items': [
                 {'kinopoiskId': 7, 'nameRu': 'Имя', 'type': 'FILM', 'year': 2020,

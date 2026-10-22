@@ -102,11 +102,7 @@ def main():
                 if verify_lookup:
                     app.refresh_lookups()
                     app.deliver()
-                waiting = any((store.user(uid) or {}).get('state', {}).get('ai_pending') or
-                              (store.user(uid) or {}).get('state', {}).get('lookup_pending')
-                              for uid in cfg['users'])
-                updates = tg.call('getUpdates', offset=store.offset(), timeout=2 if waiting or recommender.future else 25,
-                                  allowed_updates=['message', 'callback_query'])
+                updates = tg.poll(store.offset())
                 for update in updates:
                     started = time.monotonic()
                     cb = update.get('callback_query')

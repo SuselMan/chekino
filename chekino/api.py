@@ -40,7 +40,7 @@ class Telegram:
         started = time.monotonic()
         try:
             body = request(self.base + method, payload,
-                           timeout=40 if method == 'getUpdates' else (2 if method == 'answerCallbackQuery' else 8))
+                           timeout=3 if method == 'getUpdates' else (2 if method == 'answerCallbackQuery' else 8))
         finally:
             elapsed = time.monotonic() - started
             if method != 'getUpdates' or elapsed > payload.get('timeout', 0) + 2:
@@ -49,6 +49,19 @@ class Telegram:
             raise ApiError(body.get('error_code', 0), body.get('description', ''),
                            body.get('parameters', {}).get('retry_after', 0))
         return body['result']
+
+    def poll(self, offset):
+        # Long polling on this VPS intermittently held incoming buttons for 40s.
+        try:
+            updates = self.call('getUpdates', offset=offset, timeout=0,
+                                allowed_updates=['message', 'callback_query'])
+        except ApiError as exc:
+            print(f'Получение обновлений недоступно: код={exc.code}; повтор.', flush=True)
+            time.sleep(min(60, max(0.5, exc.retry_after)))
+            return []
+        if not updates:
+            time.sleep(0.35)
+        return updates
 
 
 class CallbackAcker:
