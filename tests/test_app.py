@@ -268,7 +268,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.s.user(11)['state']['mid'], 2)
         self.assertEqual(self.s.user(22)['state'], other)
         self.message('/history')
-        self.assertEqual(self.s.user(11)['state']['mode'], 'history')
+        self.assertEqual(self.s.user(11)['state']['mode'], 'queue')
 
     def test_restart_backup_restore_and_rating_constraints(self):
         self.message('https://kinopoisk.ru/film/1/')

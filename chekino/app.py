@@ -23,7 +23,9 @@ class App:
         return {'mode': 'new', 'mid': movie['id']}
 
     def action(self, uid, state, action, argument=''):
-        if action in {'queue', 'rate', 'history'}:
+        if action == 'history':  # Old commands/buttons return to the queue.
+            action = 'queue'
+        if action in {'queue', 'rate'}:
             return {'mode': action}
         if action == 'random':
             ids = self.s.ids('queue', uid)
@@ -56,8 +58,6 @@ class App:
         raise ValueError('Кнопка устарела. Открой /queue.')
 
     def visible_ids(self, uid, state):
-        if state['mode'] == 'history':
-            return sorted(self.s.catalog())
         return self.s.ids(state['mode'], uid)
 
     def handle(self, update):
@@ -94,7 +94,7 @@ class App:
                 if command in {'/start', '/help'}:
                     state = {'mode': 'queue', 'notice': 'Пришли название или ссылку Кинопоиска. '
                              '/queue — очередь, /new — рекомендации, /random — случайный фильм, '
-                             '/rate — ждут оценки, /history — каталог и исправление оценок.'}
+                             '/rate — ждут оценки.'}
                 elif command in {'/queue', '/new', '/random', '/rate', '/history'}:
                     state = self.action(actor, state, command[1:])
                 else:
@@ -138,7 +138,7 @@ class App:
             lines.append(html.escape(state['notice']))
         mode = state['mode']
         mid = state.get('mid')
-        if mode in {'queue', 'rate', 'history'}:
+        if mode in {'queue', 'rate'}:
             ids = self.visible_ids(uid, state)
             mid = mid if mid in ids else (ids[0] if ids else None)
             if mid != state.get('mid'):
@@ -150,8 +150,7 @@ class App:
                 rows.append([b('⬅️', 'page:-1'), b('➡️', 'page:1')])
             else:
                 lines.append({'queue': 'Очередь пуста. Пришли название или открой /new.',
-                              'rate': 'Все просмотренные фильмы оценены.',
-                              'history': 'Каталог пока пуст.'}[mode])
+                              'rate': 'Все просмотренные фильмы оценены.'}[mode])
         if mode == 'search':
             lines.append('Выбери произведение — оно попадёт в общую очередь:')
             for choice in state['choices']:
@@ -189,7 +188,7 @@ class App:
                 rows.append(actions)
         pending = len(self.s.ids('rate', uid))
         rows += [[b('Очередь', 'queue'), b('Новое', 'new'), b('🎲', 'random')],
-                 [b(f'⭐ Ждут оценки · {pending}', 'rate'), b('Каталог', 'history')]]
+                 [b(f'⭐ Ждут оценки · {pending}', 'rate')]]
         payload = {'text': '\n\n'.join(lines), 'parse_mode': 'HTML',
                    'reply_markup': {'inline_keyboard': rows},
                    'link_preview_options': ({'url': poster, 'prefer_large_media': True,
