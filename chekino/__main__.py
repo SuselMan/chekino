@@ -10,6 +10,7 @@ import time
 from .api import ApiError, Kinopoisk, Telegram
 from .app import App
 from .store import Store
+from .cache import MetadataCache
 
 
 def load_config(path):
@@ -80,7 +81,8 @@ def main():
         except BlockingIOError:
             parser.exit(2, 'Уже работает другой экземпляр Chekino.\n')
         tg = Telegram(cfg['token'])
-        app = App(store, Kinopoisk(cfg['metadata_key']), tg, cfg['users'],
+        cache = MetadataCache(str(dbpath) + '.metadata.sqlite', watched=store.watched)
+        app = App(store, Kinopoisk(cfg['metadata_key'], cache), tg, cfg['users'],
                   cfg.get('reveal_partner', False))
         while True:
             try:

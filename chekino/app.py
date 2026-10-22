@@ -116,6 +116,7 @@ class App:
                 self.s.db.execute('INSERT OR IGNORE INTO deletions VALUES(?,?)',
                                   (actor, msg['message_id']))
             self.s.set_state(actor, state)
+            self.s.prune_transient()
 
     def error(self, update, notice):
         # Failed input is intentionally not scheduled for deletion.

@@ -57,6 +57,18 @@ class Store:
           ON CONFLICT(id) DO UPDATE SET data=excluded.data''',
                         (movie['id'], json.dumps(movie, ensure_ascii=False)))
 
+    def prune_transient(self):
+        # Search candidates/current recommendations are temporary, never user catalog data.
+        keep = set()
+        for row in self.db.execute('SELECT state FROM users'):
+            state = json.loads(row[0])
+            if state.get('mid'):
+                keep.add(state['mid'])
+            keep.update(state.get('choices', []))
+        for row in self.db.execute('SELECT id FROM movies WHERE added=0').fetchall():
+            if row[0] not in keep:
+                self.db.execute('DELETE FROM movies WHERE id=? AND added=0', (row[0],))
+
     def movie(self, mid):
         row = self.db.execute('SELECT data FROM movies WHERE id=?', (mid,)).fetchone()
         return json.loads(row[0]) if row else None
@@ -91,6 +103,9 @@ class Store:
 
     def catalog(self):
         return {r[0] for r in self.db.execute('SELECT id FROM movies WHERE added=1')}
+
+    def watched(self):
+        return {r[0] for r in self.db.execute('SELECT DISTINCT movie FROM ratings')}
 
     def preferences(self, users):
         """Average genre affinity per person, then per couple (equal influence)."""

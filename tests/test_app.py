@@ -152,6 +152,19 @@ class AppTests(unittest.TestCase):
         self.callback('choose:1')
         self.assertEqual(self.s.catalog(), {1})
 
+    def test_replaced_recommendation_metadata_does_not_accumulate_in_catalog_db(self):
+        self.message('/new')
+        first = self.s.user(11)['state']['mid']
+        self.callback('new')
+        self.assertIsNone(self.s.movie(first))
+        self.assertEqual(self.s.db.execute('SELECT COUNT(*) FROM movies').fetchone()[0], 1)
+        self.callback('add')
+        added = self.s.user(11)['state']['mid']
+        self.message('/queue')
+        self.message('/new')
+        self.assertIsNotNone(self.s.movie(added), 'catalog metadata must be protected')
+        self.assertEqual(self.s.catalog(), {added})
+
     def test_search_disambiguation(self):
         self.p.results = [movie(1), movie(2, kind='TV_SERIES', year=2020)]
         self.message('Название')

@@ -45,11 +45,12 @@ class ApiTests(unittest.TestCase):
             self.assertNotIn('secret', str(caught.exception))
 
     def test_recommendations_exclude_catalog_and_use_both_preferences(self):
-        raw = lambda mid, genre: {'kinopoiskId': mid, 'genres': [{'genre': genre}]}
+        raw = lambda mid, genre: {'kinopoiskId': mid, 'type': 'FILM', 'genres': [{'genre': genre}]}
         def fake_get(path, **params):
             if path:
                 return raw(int(path[1:]), 'драма')
-            return {'items': [raw(1, 'драма'), raw(2, 'драма'), raw(3, 'ужасы')]}
+            return {'items': [raw(1, 'драма'), raw(2, 'драма'), raw(3, 'ужасы'),
+                             dict(raw(4, 'драма'), type='TV_SHOW')]}
         with patch('chekino.api.Kinopoisk.get', side_effect=fake_get):
             result = Kinopoisk('placeholder').recommend({1}, {11: {'драма': 2}, 22: {'ужасы': -2}})
             self.assertEqual(result['id'], 2)

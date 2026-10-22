@@ -70,14 +70,23 @@ def normalize(raw):
 
 class Kinopoisk:
     """Fixed trusted API origin; user links never become HTTP request targets."""
-    def __init__(self, key):
-        self.key = key
+    def __init__(self, key, cache=None):
+        self.key, self.cache = key, cache
 
     def get(self, path, **params):
         url = 'https://kinopoiskapiunofficial.tech/api/v2.2/films' + path
         if params:
             url += '?' + urllib.parse.urlencode(params)
-        return request(url, headers={'X-API-KEY': self.key})
+        cache_key = path + '?' + urllib.parse.urlencode(sorted(params.items()))
+        if self.cache:
+            hit = self.cache.get(cache_key)
+            if hit is not None:
+                return hit
+            self.cache.reserve()
+        result = request(url, headers={'X-API-KEY': self.key})
+        if self.cache:
+            self.cache.set(cache_key, result)
+        return result
 
     def detail(self, mid):
         return normalize(self.get('/' + str(mid)))
@@ -95,7 +104,9 @@ class Kinopoisk:
         for page in random.sample(range(1, 11), 3):
             items = self.get('', order='RATING', type='ALL', ratingFrom=7,
                              ratingTo=10, yearFrom=1970, page=page).get('items', [])
-            candidates.extend(normalize(x) for x in items if x.get('kinopoiskId') not in excluded)
+            candidates.extend(normalize(x) for x in items
+                              if x.get('kinopoiskId') not in excluded
+                              and x.get('type') in {'FILM', 'TV_SERIES', 'MINI_SERIES'})
         if not candidates:
             return None
         def score(movie):
