@@ -55,6 +55,34 @@ class ApiTests(unittest.TestCase):
             result = Kinopoisk('placeholder').recommend({1}, {11: {'драма': 2}, 22: {'ужасы': -2}})
             self.assertEqual(result['id'], 2)
 
+    def test_recommendations_respect_actual_page_count(self):
+        pages = []
+        def get(path, **params):
+            if path:
+                return {'kinopoiskId': int(path[1:]), 'type': 'FILM'}
+            pages.append(params['page'])
+            self.assertLessEqual(params['page'], 2)
+            return {'totalPages': 2, 'items': [
+                {'kinopoiskId': params['page'], 'type': 'FILM'}]}
+        with patch('chekino.api.Kinopoisk.get', side_effect=get):
+            result = Kinopoisk('placeholder').recommend({1}, {})
+        self.assertEqual(result['id'], 2)
+        self.assertEqual(pages, [1, 2])
+
+    def test_recommendations_check_remaining_pages_after_exclusions(self):
+        pages = []
+        def get(path, **params):
+            if path:
+                return {'kinopoiskId': int(path[1:]), 'type': 'FILM'}
+            page = params['page']
+            pages.append(page)
+            return {'totalPages': 4, 'items': [{'kinopoiskId': page, 'type': 'FILM'}]}
+        with patch('chekino.api.Kinopoisk.get', side_effect=get), \
+                patch('chekino.api.random.shuffle'):
+            result = Kinopoisk('placeholder').recommend({1, 2, 3}, {})
+        self.assertEqual(result['id'], 4)
+        self.assertEqual(pages, [1, 2, 3, 4])
+
     def test_two_connections_simultaneous_add_and_rate(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:
             path = Path(directory) / 'concurrent.sqlite'

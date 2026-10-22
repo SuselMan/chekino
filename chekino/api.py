@@ -100,13 +100,24 @@ class Kinopoisk:
         return [normalize(item) for item in raw.get('items', [])][:20]
 
     def recommend(self, excluded, preferences):
-        candidates = []
-        for page in random.sample(range(1, 11), 3):
-            items = self.get('', order='RATING', type='ALL', ratingFrom=7,
-                             ratingTo=10, yearFrom=1970, page=page).get('items', [])
-            candidates.extend(normalize(x) for x in items
-                              if x.get('kinopoiskId') not in excluded
-                              and x.get('type') in {'FILM', 'TV_SERIES', 'MINI_SERIES'})
+        params = dict(order='RATING', type='ALL', ratingFrom=7,
+                      ratingTo=10, yearFrom=1970)
+        first = self.get('', **params, page=1)
+        # The provider/account can expose fewer pages than the API's general limit.
+        total_pages = max(1, min(20, int(first.get('totalPages') or 1)))
+        remaining = list(range(2, total_pages + 1))
+        random.shuffle(remaining)
+        candidates = {}
+        for index, page in enumerate([1] + remaining):
+            response = first if page == 1 else self.get('', **params, page=page)
+            for item in response.get('items', []):
+                if (item.get('kinopoiskId') not in excluded
+                        and item.get('type') in {'FILM', 'TV_SERIES', 'MINI_SERIES'}):
+                    movie = normalize(item)
+                    candidates[movie['id']] = movie
+            # Normally sample three real pages; continue if exclusions exhausted them.
+            if index >= 2 and candidates:
+                break
         if not candidates:
             return None
         def score(movie):
@@ -114,4 +125,4 @@ class Kinopoisk:
             affinity = sum(sum(p.get(g, 0) for g in genres) / max(1, len(genres))
                            for p in preferences.values()) / max(1, len(preferences))
             return affinity + random.random() * 0.75
-        return self.detail(max(candidates, key=score)['id'])
+        return self.detail(max(candidates.values(), key=score)['id'])
