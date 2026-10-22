@@ -9,7 +9,7 @@ from .sol import RecommendationError, RecommendationPending, SolRecommender
 def button(text, data):
     icons = {'Очередь': '🎬', 'Новое': '✨', 'Архив': '🗄️',
              'В архив': '📦', 'Вернуть в очередь': '↩️', 'В очередь': '➕',
-             'Не интересно': '👎', 'Следующие 5': '➡️'}
+             'Не интересно': '👎'}
     if text in icons:
         text = icons[text] + ' ' + text
     elif text in {'1', '2', '3', '4', '5'}:
@@ -23,8 +23,9 @@ class App:
         self.users, self.reveal_partner = tuple(users), reveal_partner
         self.recommender, self.normalizer = recommender, normalizer
 
-    def recommend(self, uid, state):
-        excluded = self.s.catalog() | self.s.seen() | self.s.rejected()
+    def recommend(self, uid, state, append=False):
+        history = self.visible_ids(uid, state) if append and state.get('mode') == 'new' else []
+        excluded = self.s.catalog() | self.s.seen() | self.s.rejected() | set(history)
         try:
             if self.recommender:
                 movies = self.recommender.recommend_many(excluded, 5)
@@ -32,14 +33,16 @@ class App:
                 movie = self.provider.recommend(excluded, self.s.preferences(self.users))
                 movies = [movie] if movie else []
         except RecommendationPending:
-            return {'mode': 'new', 'ai_pending': True,
+            return {**({'rec_batch': history, 'mid': state.get('mid'), 'rec_append': True} if append else {}),
+                    'mode': 'new', 'ai_pending': True,
                     'notice': 'Sol готовит запас рекомендаций. Первые варианты появятся автоматически.'}
         if not movies:
-            return {'mode': 'new', 'notice': 'Запас рекомендаций пополняется. Попробуй чуть позже.'}
+            return {**({'rec_batch': history, 'mid': state.get('mid')} if append else {}),
+                    'mode': 'new', 'notice': 'Запас рекомендаций пополняется. Попробуй чуть позже.'}
         for movie in movies:
             self.s.cache(movie)
         self.s.record_recommendation(uid, movies[0]['id'])
-        return {'mode': 'new', 'mid': movies[0]['id'], 'rec_batch': [m['id'] for m in movies]}
+        return {'mode': 'new', 'mid': movies[0]['id'], 'rec_batch': history + [m['id'] for m in movies]}
 
     def refresh_recommendations(self):
         if not self.recommender or self.recommender.pending():
@@ -50,11 +53,14 @@ class App:
                 continue
             with self.s.transaction():
                 try:
-                    state = self.recommend(uid, user['state'])
+                    state = self.recommend(uid, user['state'], append=user['state'].get('rec_append', False))
                 except RecommendationError as exc:
-                    state = {'mode': 'new', 'notice': str(exc)}
+                    state = {**{k: v for k, v in user['state'].items()
+                                if k not in {'ai_pending', 'rec_append'}}, 'notice': str(exc)}
                 except ApiError:
-                    state = {'mode': 'new', 'notice': 'Кинопоиск сейчас недоступен. Попробуй позже.'}
+                    state = {**{k: v for k, v in user['state'].items()
+                                if k not in {'ai_pending', 'rec_append'}},
+                             'notice': 'Кинопоиск сейчас недоступен. Попробуй позже.'}
                 self.s.set_state(uid, state)
                 self.s.prune_transient()
 
@@ -124,12 +130,16 @@ class App:
             if not ids:
                 return {'mode': state['mode']}
             pos = ids.index(state['mid']) if state.get('mid') in ids else 0
-            mid = ids[(pos + int(argument)) % len(ids)]
+            step = int(argument)
+            if state['mode'] == 'new' and pos + step >= len(ids):
+                return self.recommend(uid, state, append=True)
+            mid = ids[max(0, pos + step) if state['mode'] == 'new' else (pos + step) % len(ids)]
             if state['mode'] == 'search':
                 self.s.cache(self.provider.detail(mid))
             elif state['mode'] == 'new':
                 self.s.record_recommendation(uid, mid)
-            return {**state, 'mid': mid}
+            return {**{k: v for k, v in state.items()
+                       if k not in {'ai_pending', 'rec_append', 'notice'}}, 'mid': mid}
         if action == 'choose':
             mid = int(argument)
             if mid not in state.get('choices', []):
@@ -142,14 +152,15 @@ class App:
         if not mid or not self.s.movie(mid):
             raise ValueError('Карточка устарела. Открой /queue.')
         if action == 'reject' and state.get('mode') == 'new':
+            ids = self.visible_ids(uid, state)
+            pos = ids.index(mid)
             self.s.reject(uid, mid)
-            remaining = [m for m in self.visible_ids(uid, state)
-                         if m != mid and m not in self.s.seen()]
-            if not remaining:
-                return self.recommend(uid, {})
-            next_mid = remaining[0]
+            remaining = self.visible_ids(uid, state)
+            if pos >= len(remaining):
+                return self.recommend(uid, {**state, 'rec_batch': remaining, 'mid': remaining[-1] if remaining else None}, append=True)
+            next_mid = remaining[pos]
             self.s.record_recommendation(uid, next_mid)
-            return {**state, 'mid': next_mid, 'rec_batch': remaining}
+            return {'mode': 'new', 'mid': next_mid, 'rec_batch': remaining}
         if action == 'restore' and state.get('mode') == 'archive':
             self.s.restore(mid)
             return {'mode': 'archive'}
@@ -332,7 +343,6 @@ class App:
                 actions.append(b('В очередь', f'choose:{mid}' if mode == 'search' else 'add'))
             if mode == 'new':
                 actions.append(b('Не интересно', 'reject'))
-                actions.append(b('Следующие 5', 'new'))
             if mode in {'queue', 'detail'} and mid in self.s.ids('queue', uid):
                 actions.append(b('В архив', 'archive'))
             if actions:

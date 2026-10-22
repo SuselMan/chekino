@@ -161,6 +161,51 @@ class SolTests(unittest.TestCase):
         self.assertEqual(self.s.catalog(), {1})
         self.assertEqual(self.app.visible_ids(111222333, state), state['rec_batch'])
 
+    def test_arrows_extend_recommendations_and_keep_back_history(self):
+        self.seed_reserve()
+        uid = 111222333
+        state = self.app.recommend(uid, {})
+        first = state['mid']
+        self.s.set_state(uid, state)
+        self.assertNotIn('Следующие 5', str(self.app.render(uid)))
+        for _ in range(5):
+            state = self.app.action(uid, state, 'page', '1')
+            self.s.set_state(uid, state)
+        self.assertEqual(len(state['rec_batch']), 10)
+        self.assertEqual(state['mid'], state['rec_batch'][5])
+        self.assertEqual(len(set(state['rec_batch'])), 10)
+        for _ in range(6):
+            state = self.app.action(uid, state, 'page', '-1')
+            self.s.set_state(uid, state)
+        self.assertEqual(state['mid'], first)
+        self.assertEqual(len(self.client.calls), 0)
+
+    def test_pending_extension_preserves_history_and_back_cancels_auto_jump(self):
+        from chekino.sol import RecommendationPending
+        self.seed_reserve()
+        uid = 111222333
+        state = self.app.recommend(uid, {})
+        state['mid'] = state['rec_batch'][-1]
+        self.s.set_state(uid, state)
+        with patch.object(self.rec, 'recommend_many', side_effect=RecommendationPending):
+            pending = self.app.action(uid, state, 'page', '1')
+        self.assertEqual(pending['rec_batch'], state['rec_batch'])
+        self.assertEqual(pending['mid'], state['mid'])
+        self.assertTrue(pending['ai_pending'])
+        back = self.app.action(uid, pending, 'page', '-1')
+        self.assertFalse(back.get('ai_pending'))
+        self.s.set_state(uid, pending)
+        self.app.refresh_recommendations()
+        complete = self.s.user(uid)['state']
+        self.assertEqual(len(complete['rec_batch']), 10)
+        self.assertEqual(complete['mid'], complete['rec_batch'][5])
+        self.s.set_state(uid, pending)
+        with patch.object(self.rec, 'recommend_many', side_effect=RecommendationError('retry')):
+            self.app.refresh_recommendations()
+        failed = self.s.user(uid)['state']
+        self.assertEqual(failed['rec_batch'], pending['rec_batch'])
+        self.assertFalse(failed.get('ai_pending'))
+
     def test_not_interested_is_permanent_feedback_not_a_rating(self):
         self.seed_reserve()
         state = self.app.recommend(111222333, {})
@@ -190,7 +235,8 @@ class SolTests(unittest.TestCase):
         self.s.set_state(111222333, second)
         following = self.app.action(111222333, second, 'reject')
         self.assertEqual(following['mid'], state['rec_batch'][2])
-        self.assertNotIn(state['mid'], following['rec_batch'])
+        self.assertIn(state['mid'], following['rec_batch'])
+        self.assertNotIn(second['mid'], following['rec_batch'])
 
     def test_consumed_batch_never_renders_empty_telegram_text(self):
         self.seed_reserve()
