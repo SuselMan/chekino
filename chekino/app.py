@@ -35,7 +35,7 @@ class App:
             if not ids:
                 return {'mode': state['mode']}
             pos = ids.index(state['mid']) if state.get('mid') in ids else 0
-            return {**state, 'mid': ids[(pos + int(argument)) % len(ids)], 'scoring': False}
+            return {**state, 'mid': ids[(pos + int(argument)) % len(ids)]}
         if action == 'choose':
             mid = int(argument)
             if mid not in state.get('choices', []):
@@ -50,11 +50,7 @@ class App:
         if action == 'add':
             self.s.add(mid)
             return {'mode': 'detail', 'mid': mid}
-        if action == 'score':
-            return {**state, 'scoring': True}
-        if action == 'cancel':
-            return {**state, 'scoring': False}
-        if action == 'vote' and state.get('scoring'):
+        if action == 'vote':
             self.s.rate(mid, uid, int(argument))
             return {'mode': 'detail', 'mid': mid}
         raise ValueError('Кнопка устарела. Открой /queue.')
@@ -146,7 +142,7 @@ class App:
             ids = self.visible_ids(uid, state)
             mid = mid if mid in ids else (ids[0] if ids else None)
             if mid != state.get('mid'):
-                state = {**state, 'mid': mid, 'scoring': False}
+                state = {**state, 'mid': mid}
                 self.s.db.execute('UPDATE users SET state=? WHERE id=?',
                                   (json.dumps(state, ensure_ascii=False), uid))
             if mid:
@@ -182,14 +178,14 @@ class App:
                 for other, value in votes.items():
                     if other != uid:
                         lines.append(f'Оценка партнёра: {value} / 5')
-            if state.get('scoring'):
-                rows += [[b(str(n), f'vote:{n}') for n in range(1, 6)], [b('Отмена', 'cancel')]]
-            else:
-                actions = [b('Изменить оценку' if uid in votes else 'Оценить', 'score')]
-                if mid not in self.s.catalog():
-                    actions.insert(0, b('В очередь', 'add'))
-                if mode == 'new':
-                    actions.append(b('Ещё', 'new'))
+            rows.append([b(f'✓ {n}' if votes.get(uid) == n else str(n), f'vote:{n}')
+                         for n in range(1, 6)])
+            actions = []
+            if mid not in self.s.catalog():
+                actions.append(b('В очередь', 'add'))
+            if mode == 'new':
+                actions.append(b('Ещё', 'new'))
+            if actions:
                 rows.append(actions)
         pending = len(self.s.ids('rate', uid))
         rows += [[b('Очередь', 'queue'), b('Новое', 'new'), b('🎲', 'random')],

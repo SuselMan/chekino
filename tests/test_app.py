@@ -89,9 +89,11 @@ class AppTests(unittest.TestCase):
     def test_shared_queue_first_vote_and_independent_second(self):
         self.message('https://kinopoisk.ru/film/1/')
         self.message('/queue', 22)
-        self.assertEqual(self.s.ids('queue', 22), [1])
-        self.callback('score')
-        self.assertEqual(self.s.ids('queue', 22), [1], 'opening stars must not mark watched')
+        payload = self.app.render(11)
+        scale = next(row for row in payload['reply_markup']['inline_keyboard']
+                     if len(row) == 5)
+        self.assertEqual([b['text'] for b in scale], ['1', '2', '3', '4', '5'])
+        self.assertEqual(self.s.ids('queue', 22), [1], 'displaying the scale must not mark watched')
         update = self.callback('vote:5')
         self.assertEqual(self.s.ids('queue', 11), [])
         self.assertEqual(self.s.ids('queue', 22), [])
@@ -100,20 +102,19 @@ class AppTests(unittest.TestCase):
         self.callback('rate', 22)
         self.assertIn('ждёт твоей оценки', self.app.render(22)['text'])
         self.assertNotIn('Оценка партнёра', self.app.render(22)['text'])
-        self.callback('score', 22)
         self.callback('vote:2', 22)
         self.assertEqual(self.s.votes(1), {11: 5, 22: 2})
         self.assertIn('Оценка партнёра: 5', self.app.render(22)['text'])
-        self.callback('score')
         self.callback('vote:4')
         self.assertEqual(self.s.votes(1), {11: 4, 22: 2})
+        scale = next(row for row in self.app.render(11)['reply_markup']['inline_keyboard'] if len(row) == 5)
+        self.assertEqual(scale[3]['text'], '✓ 4')
         self.callback('', update=update)
         self.assertEqual(self.s.votes(1), {11: 4, 22: 2})
         self.assertEqual(self.s.db.execute('SELECT COUNT(*) FROM rating_history').fetchone()[0], 3)
 
     def test_dedup_duplicate_updates_and_callbacks(self):
         self.message('https://kinopoisk.ru/film/1/')
-        self.callback('score')
         update = self.callback('vote:3')
         self.app.handle(update)
         duplicate = copy.deepcopy(update)
@@ -136,7 +137,6 @@ class AppTests(unittest.TestCase):
         self.callback('add')
         self.assertEqual(self.s.catalog(), {3})
         self.message('/new')
-        self.callback('score')
         mid = self.s.user(11)['state']['mid']
         self.assertNotIn(mid, self.s.catalog())
         self.callback('vote:5')
@@ -176,7 +176,6 @@ class AppTests(unittest.TestCase):
 
     def test_stale_button_never_rates_another_film(self):
         self.message('https://kinopoisk.ru/film/1/')
-        self.callback('score')
         old = self.s.user(11)
         self.p.results = [movie(2)]
         self.message('https://kinopoisk.ru/film/2/')
@@ -195,21 +194,19 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.s.user(11)['dirty'], 0)
         self.assertEqual(self.s.catalog(), {1})
 
-    def test_removed_queue_item_does_not_transfer_open_stars(self):
+    def test_removed_queue_item_keeps_scale_for_current_movie(self):
         self.message('https://kinopoisk.ru/film/1/')
         self.p.results = [movie(2)]
         self.message('https://kinopoisk.ru/film/2/')
         self.message('/queue')
-        self.callback('score')
         with self.s.transaction():
             self.s.rate(1, 22, 3)
         self.app.deliver()
         state = self.s.user(11)['state']
         self.assertEqual(state['mid'], 2)
-        self.assertFalse(state['scoring'])
         actions = [b['callback_data'].split(':')[1] for row in
                    self.app.render(11)['reply_markup']['inline_keyboard'] for b in row]
-        self.assertNotIn('vote', actions)
+        self.assertEqual(actions.count('vote'), 5)
 
     def test_private_access_only(self):
         self.message('Фильм', uid=33)
@@ -275,7 +272,6 @@ class AppTests(unittest.TestCase):
 
     def test_restart_backup_restore_and_rating_constraints(self):
         self.message('https://kinopoisk.ru/film/1/')
-        self.callback('score')
         last = self.callback('vote:4')
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:
             backup = Path(directory) / 'backup.sqlite'
