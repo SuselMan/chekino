@@ -7,7 +7,7 @@ from pathlib import Path
 import sqlite3
 import stat
 import time
-from .api import ApiError, Kinopoisk, Telegram
+from .api import ApiError, CallbackAcker, Kinopoisk, Telegram
 from .app import App
 from .store import Store
 from .cache import MetadataCache
@@ -83,6 +83,7 @@ def main():
         except BlockingIOError:
             parser.exit(2, 'Уже работает другой экземпляр Chekino.\n')
         tg = Telegram(cfg['token'])
+        acknowledgements = CallbackAcker(tg)
         cache = MetadataCache(str(dbpath) + '.metadata.sqlite', watched=store.watched)
         metadata = Kinopoisk(cfg['metadata_key'], cache)
         recommender = SolRecommender(
@@ -110,10 +111,7 @@ def main():
                     started = time.monotonic()
                     cb = update.get('callback_query')
                     if cb:
-                        try:
-                            tg.call('answerCallbackQuery', callback_query_id=cb['id'])
-                        except ApiError:
-                            pass
+                        acknowledgements.submit(cb['id'])
                     try:
                         app.handle(update)
                     except ValueError as exc:

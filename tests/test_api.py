@@ -7,7 +7,7 @@ import threading
 import unittest
 from unittest.mock import patch
 import urllib.error
-from chekino.api import ApiError, Kinopoisk, Telegram, request
+from chekino.api import ApiError, CallbackAcker, Kinopoisk, Telegram, request
 from chekino.store import Store
 
 
@@ -17,6 +17,33 @@ class Response(io.BytesIO):
 
 
 class ApiTests(unittest.TestCase):
+    def test_blocked_ack_does_not_delay_card_or_queue_more_acks(self):
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+        class SlowTelegram:
+            def call(self, method, **payload):
+                calls.append(method)
+                if method == 'answerCallbackQuery':
+                    entered.set()
+                    if not release.wait(3):
+                        raise RuntimeError('worker not released')
+                    raise ApiError()
+                return True
+        tg = SlowTelegram()
+        ack = CallbackAcker(tg)
+        try:
+            self.assertTrue(ack.submit('first'))
+            self.assertTrue(entered.wait(1))
+            self.assertFalse(ack.submit('second'))
+            # Delivery proceeds while the acknowledgement is still blocked.
+            self.assertTrue(tg.call('editMessageText'))
+            self.assertFalse(ack.future.done())
+        finally:
+            release.set()
+            ack.executor.shutdown(wait=True)
+        ack.future.result()
+        self.assertEqual(calls, ['answerCallbackQuery', 'editMessageText'])
+
     def test_provider_paths_and_normalization(self):
         with patch('urllib.request.urlopen', return_value=Response({'items': [
                 {'kinopoiskId': 7, 'nameRu': 'Имя', 'type': 'FILM', 'year': 2020,

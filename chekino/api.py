@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 import random
 import re
 import time
@@ -39,7 +40,7 @@ class Telegram:
         started = time.monotonic()
         try:
             body = request(self.base + method, payload,
-                           timeout=40 if method == 'getUpdates' else 8)
+                           timeout=40 if method == 'getUpdates' else (2 if method == 'answerCallbackQuery' else 8))
         finally:
             elapsed = time.monotonic() - started
             if method != 'getUpdates' or elapsed > payload.get('timeout', 0) + 2:
@@ -48,6 +49,27 @@ class Telegram:
             raise ApiError(body.get('error_code', 0), body.get('description', ''),
                            body.get('parameters', {}).get('retry_after', 0))
         return body['result']
+
+
+class CallbackAcker:
+    """Best-effort spinner dismissal must never delay domain changes or card delivery."""
+    def __init__(self, telegram):
+        self.telegram = telegram
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='chekino-ack')
+        self.future = None
+
+    def submit(self, callback_id):
+        # Do not accumulate obsolete acknowledgements during network trouble.
+        if self.future is not None and not self.future.done():
+            return False
+        self.future = self.executor.submit(self.answer, callback_id)
+        return True
+
+    def answer(self, callback_id):
+        try:
+            self.telegram.call('answerCallbackQuery', callback_query_id=callback_id)
+        except ApiError:
+            print('Подтверждение кнопки недоступно; карточка обрабатывается независимо.', flush=True)
 
 
 def canonical_id(text):
