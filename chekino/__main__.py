@@ -95,8 +95,11 @@ def main():
         while True:
             try:
                 app.refresh_recommendations()
-                app.refresh_lookups()
+                verify_lookup = app.refresh_lookups()
                 app.deliver()
+                if verify_lookup:
+                    app.refresh_lookups()
+                    app.deliver()
                 waiting = any((store.user(uid) or {}).get('state', {}).get('ai_pending') or
                               (store.user(uid) or {}).get('state', {}).get('lookup_pending')
                               for uid in cfg['users'])

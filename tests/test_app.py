@@ -170,7 +170,11 @@ class AppTests(unittest.TestCase):
         self.message('Название')
         self.assertEqual(self.s.catalog(), set())
         payload = self.app.render(11)
-        self.assertIn('Сериал', payload['reply_markup']['inline_keyboard'][1][0]['text'])
+        self.assertIn('Фильм 1', payload['text'])
+        self.assertEqual(payload['link_preview_options']['url'], movie(1)['poster'])
+        self.callback('page:1')
+        self.assertEqual(self.s.user(11)['state']['mid'], 2)
+        self.assertEqual(self.s.catalog(), set(), 'paging candidates must not add them')
         self.callback('choose:2')
         self.assertEqual(self.s.catalog(), {2})
 

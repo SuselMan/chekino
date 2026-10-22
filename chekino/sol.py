@@ -70,6 +70,8 @@ class SolClient:
                    '-m', model, '--output-schema',
                    str(Path(__file__).with_name(schema)),
                    '--json', '-']
+        if model == 'gpt-6-luna':
+            command[2:2] = ['-c', 'project_doc_max_bytes=0']
         try:
             result = subprocess.run(command, input=prompt, text=True, capture_output=True,
                                     cwd=self.workdir, timeout=120)

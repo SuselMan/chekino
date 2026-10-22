@@ -8,7 +8,7 @@ from chekino.app import App
 from chekino.lookup import LunaClient, TitleLookup
 from chekino.sol import RecommendationPending
 from chekino.store import Store
-from test_app import Telegram
+from test_app import Telegram, movie
 
 
 class Client:
@@ -24,6 +24,9 @@ class Client:
 class Metadata:
     def search(self, query):
         return []
+
+    def detail(self, mid):
+        return movie(mid, title='Интерстеллар', year=2014)
 
     def get(self, path, **params):
         return {'items': [{'kinopoiskId': 258687, 'nameRu': 'Интерстеллар',
@@ -58,7 +61,10 @@ class LookupTests(unittest.TestCase):
         self.assertFalse(any(method == 'deleteMessage' for method, _ in self.tg.calls))
         next(iter(self.lookup.jobs.values())).result(timeout=2)
         self.app.refresh_lookups()
+        self.app.refresh_lookups()
         self.assertEqual(self.s.user(11)['state']['choices'], [258687])
+        self.assertIn('Интерстеллар', self.app.render(11)['text'])
+        self.assertTrue(self.app.render(11)['link_preview_options'].get('url'))
         self.assertEqual(self.s.catalog(), set())
         self.app.deliver()
         self.assertTrue(any(method == 'deleteMessage' for method, _ in self.tg.calls))
@@ -68,9 +74,37 @@ class LookupTests(unittest.TestCase):
         self.app.handle(self.message())
         next(iter(self.lookup.jobs.values())).result(timeout=2)
         self.app.refresh_lookups()
+        self.app.refresh_lookups()
         self.app.deliver()
         self.assertIn('Уточни', self.s.user(11)['state']['notice'])
         self.assertFalse(any(method == 'deleteMessage' for method, _ in self.tg.calls))
+
+    def test_progress_shows_elapsed_then_verification_before_result(self):
+        state = {'mode': 'search', 'choices': [], 'lookup_pending': True,
+                 'query': 'интерстелар', 'input_message': 10, 'lookup_started': 100,
+                 'lookup_phase': 'model'}
+        self.s.set_state(11, state)
+        with patch.object(self.lookup, 'ready', return_value=False), \
+                patch('chekino.app.time.time', return_value=112):
+            self.app.refresh_lookups()
+        self.assertIn('10 с', self.s.user(11)['state']['notice'])
+        with patch.object(self.lookup, 'ready', return_value=True):
+            self.assertTrue(self.app.refresh_lookups())
+        self.assertIn('Кинопоиске', self.s.user(11)['state']['notice'])
+        self.assertEqual(self.s.catalog(), set())
+
+    def test_pending_lookup_survives_restart_without_losing_input(self):
+        self.s.set_state(11, {'mode': 'search', 'choices': [], 'lookup_pending': True,
+                             'query': 'интерстелар', 'input_message': 10,
+                             'lookup_started': 100, 'lookup_phase': 'model'})
+        self.app.refresh_lookups()
+        self.app.refresh_lookups()
+        self.assertTrue(self.s.user(11)['state']['lookup_pending'])
+        next(iter(self.lookup.jobs.values())).result(timeout=2)
+        self.app.refresh_lookups()
+        self.app.refresh_lookups()
+        self.assertEqual(self.s.user(11)['state']['mid'], 258687)
+        self.assertEqual(self.s.catalog(), set())
 
     def test_cached_normalization_does_not_run_agent_again(self):
         with self.assertRaises(RecommendationPending):
@@ -84,6 +118,7 @@ class LookupTests(unittest.TestCase):
         self.app.handle(self.message())
         self.s.set_state(11, {'mode': 'queue'})
         next(iter(self.lookup.jobs.values())).result(timeout=2)
+        self.app.refresh_lookups()
         self.app.refresh_lookups()
         self.assertEqual(self.s.user(11)['state'], {'mode': 'queue'})
 

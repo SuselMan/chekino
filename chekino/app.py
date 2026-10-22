@@ -1,6 +1,7 @@
 import html
 import json
 import random
+import time
 from .api import ApiError, canonical_id
 from .sol import RecommendationError, RecommendationPending, SolRecommender
 
@@ -48,13 +49,23 @@ class App:
 
     def refresh_lookups(self):
         if not self.normalizer:
-            return
+            return False
+        verification_started = False
         for uid in self.users:
             user = self.s.user(uid)
             if not user or not user['state'].get('lookup_pending'):
                 continue
             previous = user['state']
+            elapsed = max(0, int(time.time() - previous.get('lookup_started', time.time())))
             if not self.normalizer.ready(previous['query']):
+                notice = f'Luna уточняет название… · {elapsed // 5 * 5} с\nВвод сохранён.'
+                if previous.get('notice') != notice:
+                    self.s.set_state(uid, {**previous, 'notice': notice})
+                continue
+            if previous.get('lookup_phase') != 'verify':
+                self.s.set_state(uid, {**previous, 'lookup_phase': 'verify',
+                                      'notice': f'Проверяю найденные варианты в Кинопоиске… · {elapsed} с'})
+                verification_started = True
                 continue
             with self.s.transaction():
                 try:
@@ -63,15 +74,26 @@ class App:
                         raise RecommendationError('Не нашёл точное произведение. Уточни название или пришли ссылку.')
                     for movie in movies:
                         self.s.cache(movie)
-                    state = {'mode': 'search', 'choices': [m['id'] for m in movies],
-                             'notice': 'Luna уточнила название. Подтверди произведение ниже.'}
+                    state = self.search_state(movies, 'Нашёл варианты. Листай и выбери нужный фильм.')
                     self.s.db.execute('INSERT OR IGNORE INTO deletions VALUES(?,?)',
                                       (uid, previous['input_message']))
+                except RecommendationPending:
+                    # The service may have restarted while this lookup was in flight.
+                    state = {**previous, 'lookup_phase': 'model',
+                             'notice': 'Luna уточняет название… Ввод сохранён.'}
                 except (RecommendationError, ApiError) as exc:
                     state = {'mode': 'search', 'choices': [], 'notice': str(exc) if isinstance(
                         exc, RecommendationError) else 'Источник метаданных недоступен. Ввод сохранён.'}
                 self.s.set_state(uid, state)
                 self.s.prune_transient()
+
+        return verification_started
+
+    def search_state(self, movies, notice=None):
+        first = self.provider.detail(movies[0]['id'])
+        self.s.cache(first)
+        return {'mode': 'search', 'choices': [m['id'] for m in movies],
+                'mid': first['id'], **({'notice': notice} if notice else {})}
 
     def action(self, uid, state, action, argument=''):
         if action == 'history':  # Old commands/buttons return to the queue.
@@ -88,7 +110,10 @@ class App:
             if not ids:
                 return {'mode': state['mode']}
             pos = ids.index(state['mid']) if state.get('mid') in ids else 0
-            return {**state, 'mid': ids[(pos + int(argument)) % len(ids)]}
+            mid = ids[(pos + int(argument)) % len(ids)]
+            if state['mode'] == 'search':
+                self.s.cache(self.provider.detail(mid))
+            return {**state, 'mid': mid}
         if action == 'choose':
             mid = int(argument)
             if mid not in state.get('choices', []):
@@ -109,6 +134,8 @@ class App:
         raise ValueError('Кнопка устарела. Открой /queue.')
 
     def visible_ids(self, uid, state):
+        if state['mode'] == 'search':
+            return state.get('choices', [])
         return self.s.ids(state['mode'], uid)
 
     def handle(self, update):
@@ -158,6 +185,7 @@ class App:
                         except RecommendationPending:
                             state = {'mode': 'search', 'choices': [], 'lookup_pending': True,
                                      'query': text, 'input_message': msg['message_id'],
+                                     'lookup_started': time.time(), 'lookup_phase': 'model',
                                      'notice': 'Luna уточняет название. Ввод сохранён; карточка обновится сама.'}
                             self.s.set_state(actor, state)
                             return
@@ -170,7 +198,7 @@ class App:
                         self.s.add(movie['id'])
                         state = {'mode': 'detail', 'mid': movie['id']}
                     else:
-                        state = {'mode': 'search', 'choices': [m['id'] for m in movies]}
+                        state = self.search_state(movies)
                 self.s.db.execute('INSERT OR IGNORE INTO deletions VALUES(?,?)',
                                   (actor, msg['message_id']))
             self.s.set_state(actor, state)
@@ -200,7 +228,7 @@ class App:
             lines.append(html.escape(state['notice']))
         mode = state['mode']
         mid = state.get('mid')
-        if mode in {'queue', 'rate'}:
+        if mode in {'queue', 'rate', 'search'}:
             ids = self.visible_ids(uid, state)
             mid = mid if mid in ids else (ids[0] if ids else None)
             if mid != state.get('mid'):
@@ -209,17 +237,13 @@ class App:
                                   (json.dumps(state, ensure_ascii=False), uid))
             if mid:
                 lines.append(f'{ids.index(mid) + 1} / {len(ids)}')
-                rows.append([b('⬅️', 'page:-1'), b('➡️', 'page:1')])
+                if mode != 'search' or len(ids) > 1:
+                    rows.append([b('⬅️', 'page:-1'), b('➡️', 'page:1')])
             else:
                 lines.append({'queue': 'Очередь пуста. Пришли название или открой /new.',
-                              'rate': 'Все просмотренные фильмы оценены.'}[mode])
-        if mode == 'search':
-            lines.append('Выбери произведение — оно попадёт в общую очередь:')
-            for choice in state['choices']:
-                m = self.s.movie(choice)
-                label = f"{m['title']} · {m.get('year') or 'год неизвестен'} · {kind(m)}"
-                rows.append([b(label[:90], f'choose:{choice}')])
-        elif mid:
+                              'rate': 'Все просмотренные фильмы оценены.',
+                              'search': ''}[mode])
+        if mid:
             movie = self.s.movie(mid)
             votes = self.s.votes(mid)
             poster = movie['poster']
@@ -235,7 +259,8 @@ class App:
             elif mid in self.s.catalog():
                 lines.append('В общей очереди')
             else:
-                lines.append('Новая рекомендация для совместного просмотра')
+                lines.append('Найденный фильм — ещё не в очереди' if mode == 'search' else
+                             'Новая рекомендация для совместного просмотра')
             if uid in votes:
                 lines.append(f'Твоя оценка: {votes[uid]} / 5')
             if uid in votes or self.reveal_partner:
@@ -246,7 +271,7 @@ class App:
                          for n in range(1, 6)])
             actions = []
             if mid not in self.s.catalog():
-                actions.append(b('В очередь', 'add'))
+                actions.append(b('В очередь', f'choose:{mid}' if mode == 'search' else 'add'))
             if mode == 'new':
                 actions.append(b('Ещё', 'new'))
             if actions:
