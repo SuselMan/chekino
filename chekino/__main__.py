@@ -70,7 +70,7 @@ def main():
         else:
             with store.transaction():
                 data = {table: [dict(r) for r in store.db.execute('SELECT * FROM ' + table)]
-                        for table in ('movies', 'ratings', 'rating_history', 'rejections', 'recommendation_seen')}
+                        for table in ('movies', 'ratings', 'rating_history', 'archives', 'rejections', 'recommendation_seen')}
             destination.write_text(json.dumps(data, ensure_ascii=False, indent=2))
         print('Приватная копия создана.')
         return

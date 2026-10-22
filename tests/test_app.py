@@ -113,6 +113,49 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.s.votes(1), {11: 4, 22: 2})
         self.assertEqual(self.s.db.execute('SELECT COUNT(*) FROM rating_history').fetchone()[0], 3)
 
+    def test_archive_is_shared_persistent_and_excluded_from_repeats(self):
+        self.message('https://kinopoisk.ru/film/1/')
+        self.message('/queue', 22)
+        self.message('/queue')
+        self.assertIn('В архив', str(self.app.render(11)['reply_markup']))
+        self.callback('archive')
+        self.assertTrue(self.s.archived(1))
+        self.assertIsNotNone(self.s.movie(1))
+        self.assertEqual(self.s.votes(1), {})
+        for uid in (11, 22):
+            self.assertEqual(self.s.ids('queue', uid), [])
+            self.assertEqual(self.s.ids('rate', uid), [])
+            self.assertNotIn('Фильм 1', self.app.render(uid)['text'])
+        self.message('/random')
+        self.assertNotIn('Фильм 1', self.app.render(11)['text'])
+        self.message('/new')
+        self.assertIn(1, self.p.exclusions[-1])
+        self.assertNotEqual(self.s.user(11)['state'].get('mid'), 1)
+        with self.assertRaisesRegex(ValueError, 'архиве'):
+            self.message('https://kinopoisk.ru/film/1/')
+        with self.assertRaisesRegex(ValueError, 'архиве'):
+            self.s.add(1)
+        self.s.prune_transient()
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:
+            path = Path(directory) / 'backup.sqlite'
+            self.s.backup(path)
+            restored = Store(path)
+            try:
+                self.assertTrue(restored.archived(1))
+                self.assertIsNotNone(restored.movie(1))
+                self.assertEqual(restored.ids('queue', 11), [])
+            finally:
+                restored.db.close()
+
+    def test_watched_movie_cannot_be_archived(self):
+        self.message('https://kinopoisk.ru/film/1/')
+        self.callback('vote:4')
+        self.assertNotIn('В архив', str(self.app.render(11)['reply_markup']))
+        with self.assertRaises(ValueError):
+            self.callback('archive')
+        self.assertFalse(self.s.archived(1))
+        self.assertEqual(self.s.votes(1), {11: 4})
+
     def test_dedup_duplicate_updates_and_callbacks(self):
         self.message('https://kinopoisk.ru/film/1/')
         update = self.callback('vote:3')

@@ -73,7 +73,8 @@ class App:
                 continue
             with self.s.transaction():
                 try:
-                    movies = self.normalizer.lookup(previous['query'])
+                    movies = [m for m in self.normalizer.lookup(previous['query'])
+                              if not self.s.archived(m['id'])]
                     if not movies:
                         raise RecommendationError('Не нашёл точное произведение. Уточни название или пришли ссылку.')
                     for movie in movies:
@@ -140,6 +141,9 @@ class App:
             next_mid = remaining[0]
             self.s.record_recommendation(uid, next_mid)
             return {**state, 'mid': next_mid, 'rec_batch': remaining}
+        if action == 'archive' and state.get('mode') in {'queue', 'detail'}:
+            self.s.archive(mid)
+            return {'mode': 'queue'}
         if action == 'add':
             self.s.add(mid)
             return {'mode': 'detail', 'mid': mid}
@@ -150,7 +154,7 @@ class App:
 
     def visible_ids(self, uid, state):
         if state['mode'] == 'search':
-            return state.get('choices', [])
+            return [mid for mid in state.get('choices', []) if not self.s.archived(mid)]
         if state['mode'] == 'new':
             excluded = self.s.catalog() | self.s.rejected()
             return [mid for mid in state.get('rec_batch', [state.get('mid')])
@@ -209,6 +213,10 @@ class App:
                                      'notice': 'Luna уточняет название. Ввод сохранён; карточка обновится сама.'}
                             self.s.set_state(actor, state)
                             return
+                    had_results = bool(movies)
+                    movies = [m for m in movies if not self.s.archived(m['id'])]
+                    if had_results and not movies:
+                        raise ValueError('Этот фильм уже в архиве.')
                     for movie in movies:
                         self.s.cache(movie)
                     if not movies:
@@ -240,6 +248,10 @@ class App:
     def render(self, uid):
         user = self.s.user(uid)
         state = user['state']
+        if self.s.archived(state.get('mid')):
+            state = {'mode': 'queue'}
+            self.s.db.execute('UPDATE users SET state=? WHERE id=?',
+                              (json.dumps(state), uid))
         revision = user['revision']
         def b(label, action):
             return button(label, f'{revision}:{action}')
@@ -297,6 +309,8 @@ class App:
             if mode == 'new':
                 actions.append(b('Не интересно', 'reject'))
                 actions.append(b('Следующие 5', 'new'))
+            if mode in {'queue', 'detail'} and mid in self.s.ids('queue', uid):
+                actions.append(b('В архив', 'archive'))
             if actions:
                 rows.append(actions)
         pending = len(self.s.ids('rate', uid))

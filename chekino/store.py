@@ -13,6 +13,9 @@ class Store:
         PRAGMA journal_mode=WAL;
         CREATE TABLE IF NOT EXISTS movies (
           id INTEGER PRIMARY KEY, data TEXT NOT NULL, added INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS archives (
+          movie INTEGER PRIMARY KEY REFERENCES movies(id),
+          created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS ratings (
           movie INTEGER REFERENCES movies(id), user INTEGER NOT NULL,
           value INTEGER NOT NULL CHECK(value BETWEEN 1 AND 5),
@@ -84,7 +87,18 @@ class Store:
         row = self.db.execute('SELECT data FROM movies WHERE id=?', (mid,)).fetchone()
         return json.loads(row[0]) if row else None
 
+    def archived(self, mid):
+        return self.db.execute('SELECT 1 FROM archives WHERE movie=?', (mid,)).fetchone() is not None
+
+    def archive(self, mid):
+        if mid not in self.ids('queue', 0):
+            raise ValueError('Фильм уже не в очереди.')
+        self.db.execute('INSERT OR IGNORE INTO archives(movie) VALUES(?)', (mid,))
+        self.invalidate()
+
     def add(self, mid):
+        if self.archived(mid):
+            raise ValueError('Этот фильм уже в архиве.')
         self.db.execute('UPDATE movies SET added=1 WHERE id=?', (mid,))
         self.invalidate()
 
@@ -103,10 +117,12 @@ class Store:
     def ids(self, mode, uid):
         if mode == 'rate':
             query = '''SELECT id FROM movies WHERE added=1
+              AND NOT EXISTS(SELECT 1 FROM archives WHERE movie=id)
               AND EXISTS(SELECT 1 FROM ratings WHERE movie=id)
               AND NOT EXISTS(SELECT 1 FROM ratings WHERE movie=id AND user=?) ORDER BY id'''
             return [r[0] for r in self.db.execute(query, (uid,))]
         return [r[0] for r in self.db.execute('''SELECT id FROM movies WHERE added=1
+              AND NOT EXISTS(SELECT 1 FROM archives WHERE movie=id)
           AND NOT EXISTS(SELECT 1 FROM ratings WHERE movie=id) ORDER BY id''')]
 
     def votes(self, mid):
