@@ -1,4 +1,6 @@
 import json
+import http.client
+import socket
 from concurrent.futures import ThreadPoolExecutor
 import random
 import re
@@ -14,12 +16,43 @@ class ApiError(Exception):
         self.code, self.description, self.retry_after = code, description, retry_after
 
 
-def request(url, payload=None, headers=None, timeout=40):
+def ipv4_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+    last_error = None
+    for family, kind, proto, _, endpoint in socket.getaddrinfo(
+            address[0], address[1], socket.AF_INET, socket.SOCK_STREAM):
+        sock = socket.socket(family, kind, proto)
+        try:
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(endpoint)
+            return sock
+        except OSError as exc:
+            last_error = exc
+            sock.close()
+    raise last_error or OSError('No IPv4 address')
+
+
+class IPv4HTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = ipv4_connection
+
+
+class IPv4HTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(IPv4HTTPSConnection, req, context=self._context)
+
+
+TELEGRAM_OPENER = urllib.request.build_opener(IPv4HTTPSHandler())
+
+def request(url, payload=None, headers=None, timeout=40, ipv4=False):
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(url, data=data,
                                  headers={'Content-Type': 'application/json', **(headers or {})})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        with (TELEGRAM_OPENER.open if ipv4 else urllib.request.urlopen)(req, timeout=timeout) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         try:
@@ -40,7 +73,8 @@ class Telegram:
         started = time.monotonic()
         try:
             body = request(self.base + method, payload,
-                           timeout=3 if method == 'getUpdates' else (2 if method == 'answerCallbackQuery' else 8))
+                           timeout=3 if method == 'getUpdates' else (2 if method == 'answerCallbackQuery' else 8),
+                           ipv4=True)
         finally:
             elapsed = time.monotonic() - started
             if method != 'getUpdates' or elapsed > payload.get('timeout', 0) + 2:

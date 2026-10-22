@@ -2,12 +2,13 @@ import io
 import json
 from pathlib import Path
 import sqlite3
+import socket
 import tempfile
 import threading
 import unittest
 from unittest.mock import patch
 import urllib.error
-from chekino.api import ApiError, CallbackAcker, Kinopoisk, Telegram, request
+from chekino.api import ApiError, CallbackAcker, Kinopoisk, Telegram, ipv4_connection, request
 from chekino.store import Store
 
 
@@ -52,6 +53,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(http.call_args.args[1]['offset'], 42)
         self.assertEqual(http.call_args.args[1]['timeout'], 0)
         self.assertEqual(http.call_args.kwargs['timeout'], 3)
+        self.assertTrue(http.call_args.kwargs['ipv4'])
         sleep.assert_called_once_with(0.35)
 
     def test_short_poll_failure_recovers_without_global_backoff(self):
@@ -65,6 +67,20 @@ class ApiTests(unittest.TestCase):
                 patch('chekino.api.time.sleep') as sleep:
             tg.poll(42)
         sleep.assert_called_once_with(7)
+
+    def test_telegram_ipv4_connection_keeps_failover_and_closes_failed_socket(self):
+        addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('192.0.2.1', 443)),
+                     (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('192.0.2.2', 443))]
+        from unittest.mock import MagicMock
+        first, second = MagicMock(), MagicMock()
+        first.connect.side_effect = OSError()
+        with patch('chekino.api.socket.getaddrinfo', return_value=addresses) as resolve, \
+                patch('chekino.api.socket.socket', side_effect=[first, second]):
+            self.assertIs(ipv4_connection(('api.telegram.org', 443), 3), second)
+        resolve.assert_called_once_with('api.telegram.org', 443, socket.AF_INET, socket.SOCK_STREAM)
+        first.close.assert_called_once()
+        second.settimeout.assert_called_once_with(3)
+        second.close.assert_not_called()
 
     def test_provider_paths_and_normalization(self):
         with patch('urllib.request.urlopen', return_value=Response({'items': [
@@ -82,7 +98,7 @@ class ApiTests(unittest.TestCase):
             api.assert_called_once_with('/7')
 
     def test_telegram_payload_and_redacted_errors(self):
-        with patch('urllib.request.urlopen', return_value=Response({'ok': True, 'result': []})) as http:
+        with patch('chekino.api.TELEGRAM_OPENER.open', return_value=Response({'ok': True, 'result': []})) as http:
             self.assertEqual(Telegram('placeholder').call('getUpdates', offset=2), [])
             self.assertEqual(json.loads(http.call_args.args[0].data), {'offset': 2})
         body = io.BytesIO(b'{"description":"Too Many Requests", "parameters":{"retry_after":7}}')
