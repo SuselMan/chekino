@@ -53,6 +53,9 @@ class Store:
                         (uid, json.dumps(state, ensure_ascii=False)))
 
     def cache(self, movie):
+        previous = self.movie(movie['id'])
+        if previous and previous.get('why') and not movie.get('why'):
+            movie = {**movie, 'why': previous['why']}
         self.db.execute('''INSERT INTO movies(id,data) VALUES(?,?)
           ON CONFLICT(id) DO UPDATE SET data=excluded.data''',
                         (movie['id'], json.dumps(movie, ensure_ascii=False)))

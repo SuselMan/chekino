@@ -11,6 +11,8 @@ from .api import ApiError, Kinopoisk, Telegram
 from .app import App
 from .store import Store
 from .cache import MetadataCache
+from .sol import SolClient, SolRecommender
+from .lookup import LunaClient, TitleLookup
 
 
 def load_config(path):
@@ -82,12 +84,23 @@ def main():
             parser.exit(2, 'Уже работает другой экземпляр Chekino.\n')
         tg = Telegram(cfg['token'])
         cache = MetadataCache(str(dbpath) + '.metadata.sqlite', watched=store.watched)
-        app = App(store, Kinopoisk(cfg['metadata_key'], cache), tg, cfg['users'],
-                  cfg.get('reveal_partner', False))
+        metadata = Kinopoisk(cfg['metadata_key'], cache)
+        recommender = SolRecommender(
+            store, metadata, SolClient(dbpath.parent / 'agent-work'), cfg['users'],
+            str(dbpath) + '.sol.sqlite')
+        normalizer = TitleLookup(metadata, LunaClient(dbpath.parent / 'agent-work'),
+                                 str(dbpath) + '.sol.sqlite')
+        app = App(store, metadata, tg, cfg['users'],
+                  cfg.get('reveal_partner', False), recommender=recommender, normalizer=normalizer)
         while True:
             try:
+                app.refresh_recommendations()
+                app.refresh_lookups()
                 app.deliver()
-                updates = tg.call('getUpdates', offset=store.offset(), timeout=25,
+                waiting = any((store.user(uid) or {}).get('state', {}).get('ai_pending') or
+                              (store.user(uid) or {}).get('state', {}).get('lookup_pending')
+                              for uid in cfg['users'])
+                updates = tg.call('getUpdates', offset=store.offset(), timeout=2 if waiting else 25,
                                   allowed_updates=['message', 'callback_query'])
                 for update in updates:
                     try:

@@ -2,6 +2,7 @@ import html
 import json
 import random
 from .api import ApiError, canonical_id
+from .sol import RecommendationError, RecommendationPending, SolRecommender
 
 
 def button(text, data):
@@ -9,18 +10,68 @@ def button(text, data):
 
 
 class App:
-    def __init__(self, store, provider, telegram, users, reveal_partner=False):
+    def __init__(self, store, provider, telegram, users, reveal_partner=False, recommender=None, normalizer=None):
         self.s, self.provider, self.tg = store, provider, telegram
         self.users, self.reveal_partner = tuple(users), reveal_partner
+        self.recommender, self.normalizer = recommender, normalizer
 
     def recommend(self, uid, state):
         excluded = self.s.catalog() | self.s.recently_shown(uid)
-        movie = self.provider.recommend(excluded, self.s.preferences(self.users))
+        try:
+            movie = (self.recommender.recommend(excluded) if self.recommender else
+                     self.provider.recommend(excluded, self.s.preferences(self.users)))
+        except RecommendationPending:
+            return {'mode': 'new', 'ai_pending': True,
+                    'notice': 'Sol подбирает фильмы по вашим оценкам. Карточка обновится сама.'}
         if movie is None:
             return {'mode': 'new', 'notice': 'Новых рекомендаций сейчас нет. Попробуй позже.'}
         self.s.cache(movie)
         self.s.record_recommendation(uid, movie['id'])
         return {'mode': 'new', 'mid': movie['id']}
+
+    def refresh_recommendations(self):
+        if not self.recommender or self.recommender.pending():
+            return
+        for uid in self.users:
+            user = self.s.user(uid)
+            if not user or not user['state'].get('ai_pending'):
+                continue
+            with self.s.transaction():
+                try:
+                    state = self.recommend(uid, user['state'])
+                except RecommendationError as exc:
+                    state = {'mode': 'new', 'notice': str(exc)}
+                except ApiError:
+                    state = {'mode': 'new', 'notice': 'Кинопоиск сейчас недоступен. Попробуй позже.'}
+                self.s.set_state(uid, state)
+                self.s.prune_transient()
+
+    def refresh_lookups(self):
+        if not self.normalizer:
+            return
+        for uid in self.users:
+            user = self.s.user(uid)
+            if not user or not user['state'].get('lookup_pending'):
+                continue
+            previous = user['state']
+            if not self.normalizer.ready(previous['query']):
+                continue
+            with self.s.transaction():
+                try:
+                    movies = self.normalizer.lookup(previous['query'])
+                    if not movies:
+                        raise RecommendationError('Не нашёл точное произведение. Уточни название или пришли ссылку.')
+                    for movie in movies:
+                        self.s.cache(movie)
+                    state = {'mode': 'search', 'choices': [m['id'] for m in movies],
+                             'notice': 'Luna уточнила название. Подтверди произведение ниже.'}
+                    self.s.db.execute('INSERT OR IGNORE INTO deletions VALUES(?,?)',
+                                      (uid, previous['input_message']))
+                except (RecommendationError, ApiError) as exc:
+                    state = {'mode': 'search', 'choices': [], 'notice': str(exc) if isinstance(
+                        exc, RecommendationError) else 'Источник метаданных недоступен. Ввод сохранён.'}
+                self.s.set_state(uid, state)
+                self.s.prune_transient()
 
     def action(self, uid, state, action, argument=''):
         if action == 'history':  # Old commands/buttons return to the queue.
@@ -99,6 +150,17 @@ class App:
                     state = self.action(actor, state, command[1:])
                 else:
                     movies = self.provider.search(text)
+                    if (self.normalizer and canonical_id(text) is None and not any(
+                            SolRecommender.comparable(text) == SolRecommender.comparable(m['title'])
+                            for m in movies)):
+                        try:
+                            movies = self.normalizer.lookup(text)
+                        except RecommendationPending:
+                            state = {'mode': 'search', 'choices': [], 'lookup_pending': True,
+                                     'query': text, 'input_message': msg['message_id'],
+                                     'notice': 'Luna уточняет название. Ввод сохранён; карточка обновится сама.'}
+                            self.s.set_state(actor, state)
+                            return
                     for movie in movies:
                         self.s.cache(movie)
                     if not movies:
@@ -165,6 +227,9 @@ class App:
                       f"{movie.get('year') or 'Год неизвестен'} · {kind(movie)}",
                       html.escape(movie['description'][:1200]) or 'Описание недоступно.',
                       f'<a href="https://www.kinopoisk.ru/{"series" if movie["kind"] in {"TV_SERIES", "MINI_SERIES", "TV_SHOW"} else "film"}/{mid}/">Кинопоиск</a>']
+            if movie.get('why'):
+                lines.append('<b>Почему вам может понравиться</b>\n' +
+                             html.escape(movie['why'][:500]))
             if votes:
                 lines.append('ПРОСМОТРЕНО' + (' — ждёт твоей оценки' if uid not in votes else ''))
             elif mid in self.s.catalog():
