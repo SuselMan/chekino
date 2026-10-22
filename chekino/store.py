@@ -94,8 +94,8 @@ class Store:
         return self.db.execute('SELECT 1 FROM archives WHERE movie=?', (mid,)).fetchone() is not None
 
     def archive(self, mid):
-        if mid not in self.ids('queue', 0):
-            raise ValueError('Фильм уже не в очереди.')
+        if mid not in self.catalog() or self.archived(mid):
+            raise ValueError('Фильм уже в архиве или не добавлен.')
         self.db.execute('INSERT OR IGNORE INTO archives(movie) VALUES(?)', (mid,))
         self.invalidate()
 

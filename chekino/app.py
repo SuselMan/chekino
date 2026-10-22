@@ -8,7 +8,7 @@ from .sol import RecommendationError, RecommendationPending, SolRecommender
 
 def button(text, data):
     icons = {'Очередь': '🎬', 'Новое': '✨', 'Архив': '🗄️',
-             'В архив': '📦', 'Вернуть в очередь': '↩️', 'В очередь': '➕',
+             'В архив': '📦', 'Вернуть в очередь': '↩️', 'Вернуть из архива': '↩️', 'В очередь': '➕',
              'Не интересно': '👎'}
     if text in icons:
         text = icons[text] + ' ' + text
@@ -164,9 +164,9 @@ class App:
         if action == 'restore' and state.get('mode') == 'archive':
             self.s.restore(mid)
             return {'mode': 'archive'}
-        if action == 'archive' and state.get('mode') in {'queue', 'detail'}:
+        if action == 'archive' and state.get('mode') in {'queue', 'rate', 'detail'}:
             self.s.archive(mid)
-            return {'mode': 'queue'}
+            return {'mode': 'rate' if state.get('mode') == 'rate' else 'queue'}
         if action == 'add':
             self.s.add(mid)
             return {'mode': 'detail', 'mid': mid}
@@ -338,12 +338,12 @@ class App:
                          for n in range(1, 6)])
             actions = []
             if mode == 'archive':
-                actions.append(b('Вернуть в очередь', 'restore'))
+                actions.append(b('Вернуть из архива' if votes else 'Вернуть в очередь', 'restore'))
             if mid not in self.s.catalog():
                 actions.append(b('В очередь', f'choose:{mid}' if mode == 'search' else 'add'))
             if mode == 'new':
                 actions.append(b('Не интересно', 'reject'))
-            if mode in {'queue', 'detail'} and mid in self.s.ids('queue', uid):
+            if mode in {'queue', 'rate', 'detail'} and mid in self.s.catalog():
                 actions.append(b('В архив', 'archive'))
             if actions:
                 rows.append(actions)

@@ -180,13 +180,27 @@ class AppTests(unittest.TestCase):
         self.s.cache(movie(1, rating_kp=None, rating_imdb=None))
         self.assertIn('Кинопоиск: — · IMDb: —', self.app.render(11)['text'])
 
-    def test_watched_movie_cannot_be_archived(self):
+    def test_archive_from_waiting_for_rating_preserves_existing_vote_and_restore(self):
         self.message('https://kinopoisk.ru/film/1/')
         self.callback('vote:4')
-        self.assertNotIn('В архив', str(self.app.render(11)['reply_markup']))
-        with self.assertRaises(ValueError):
-            self.callback('archive')
-        self.assertFalse(self.s.archived(1))
+        self.message('/rate', 22)
+        self.assertIn('📦 В архив', str(self.app.render(22)['reply_markup']))
+        before_history = self.s.db.execute('SELECT COUNT(*) FROM rating_history').fetchone()[0]
+        self.callback('archive', 22)
+        self.assertEqual(self.s.user(22)['state']['mode'], 'rate')
+        self.assertTrue(self.s.archived(1))
+        self.assertEqual(self.s.ids('rate', 22), [])
+        self.assertEqual(self.s.ids('queue', 11), [])
+        self.assertEqual(self.s.votes(1), {11: 4})
+        self.assertEqual(self.s.db.execute('SELECT COUNT(*) FROM rating_history').fetchone()[0], before_history)
+        self.message('/archive', 22)
+        card = self.app.render(22)
+        self.assertIn('↩️ Вернуть из архива', str(card['reply_markup']))
+        self.assertNotIn('Оценка партнёра', card['text'])
+        self.callback('restore', 22)
+        self.assertEqual(self.s.ids('rate', 22), [1])
+        self.assertEqual(self.s.ids('rate', 11), [])
+        self.assertEqual(self.s.ids('queue', 22), [])
         self.assertEqual(self.s.votes(1), {11: 4})
 
     def test_dedup_duplicate_updates_and_callbacks(self):
