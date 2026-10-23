@@ -33,6 +33,9 @@ def load_config(path):
         raise ValueError('Путь database должен быть абсолютным.')
     if type(config.get('reveal_partner', False)) is not bool:
         raise ValueError('reveal_partner должен быть boolean.')
+    requirements = config.get('requirements_file')
+    if requirements is not None and (not isinstance(requirements, str) or not Path(requirements).is_absolute()):
+        raise ValueError('requirements_file должен быть абсолютным путём.')
     return config
 
 
@@ -88,7 +91,7 @@ def main():
         metadata = Kinopoisk(cfg['metadata_key'], cache)
         recommender = SolRecommender(
             store, metadata, SolClient(dbpath.parent / 'agent-work'), cfg['users'],
-            str(dbpath) + '.sol.sqlite')
+            str(dbpath) + '.sol.sqlite', requirements_path=cfg.get('requirements_file'))
         normalizer = TitleLookup(metadata, LunaClient(dbpath.parent / 'agent-work'),
                                  str(dbpath) + '.sol.sqlite')
         app = App(store, metadata, tg, cfg['users'],

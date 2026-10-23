@@ -187,7 +187,8 @@ class App:
         if state['mode'] == 'new':
             excluded = self.s.catalog() | self.s.rejected()
             return [mid for mid in state.get('rec_batch', [state.get('mid')])
-                    if mid and mid not in excluded]
+                    if mid and mid not in excluded and (not self.recommender or
+                        self.recommender.allowed(self.s.movie(mid)))]
         return self.s.ids(state['mode'], uid)
 
     def handle(self, update):

@@ -95,6 +95,12 @@ class MetadataCache:
                 self.trim(max(0, self.size() - required))
         # Cache pressure must not discard a successfully fetched movie or input.
 
+    def wait_seconds(self):
+        now = time.time()
+        count, oldest = self.db.execute(
+            'SELECT COUNT(*),MIN(at) FROM requests WHERE at>?', (now - 86400,)).fetchone()
+        return max(1, math.ceil(oldest + 86400 - now)) if count >= self.budget else 0
+
     def reserve(self):
         # Attempts, including failures, count before HTTP; cache eviction never resets them.
         self.db.execute('BEGIN IMMEDIATE')
@@ -103,7 +109,7 @@ class MetadataCache:
             self.db.execute('DELETE FROM requests WHERE at<=?', (now - 86400,))
             count = self.db.execute('SELECT COUNT(*) FROM requests').fetchone()[0]
             if count >= self.budget:
-                raise ApiError(429, 'Local metadata API budget exhausted')
+                raise ApiError(429, 'Local metadata API budget exhausted', self.wait_seconds())
             self.db.execute('INSERT INTO requests VALUES(?)', (now,))
             self.db.execute('COMMIT')
         except BaseException:

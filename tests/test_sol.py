@@ -22,7 +22,7 @@ class FakeClient:
         self.gate = None
         self.failure = False
 
-    def generate(self, profile, avoid):
+    def generate(self, profile, avoid, requirements=None):
         self.calls.append((profile, avoid))
         if self.gate:
             self.gate.wait(timeout=5)
@@ -59,6 +59,105 @@ class SolTests(unittest.TestCase):
         self.rec.db.close()
         self.s.db.close()
         self.directory.cleanup()
+
+    def test_model_cap_reports_rolling_wait_instead_of_tomorrow(self):
+        for _ in range(20):
+            self.rec.reserve()
+        with self.assertRaisesRegex(RecommendationError, '24 часа.*через'):
+            self.rec.reserve()
+        self.assertEqual(self.rec.db.execute('SELECT COUNT(*) FROM attempts').fetchone()[0], 20)
+
+    def test_metadata_budget_stops_model_before_spending_attempt(self):
+        from unittest.mock import Mock
+        self.metadata.cache = Mock()
+        self.metadata.cache.wait_seconds.return_value = 3600
+        self.rec.maintain()
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(self.rec.db.execute('SELECT COUNT(*) FROM attempts').fetchone()[0], 0)
+        self.assertIn('Кинопоиска', self.rec.last_error)
+        self.assertIsNone(self.rec.future)
+
+    def test_partial_verification_resumes_saved_batch_without_new_model(self):
+        from chekino.api import ApiError
+        original = self.metadata.detail
+        def fail_second(mid):
+            if mid == 3:
+                raise ApiError(429, retry_after=3600)
+            return original(mid)
+        self.metadata.detail = fail_second
+        self.rec.maintain()
+        with self.assertRaises(ApiError):
+            self.rec.future.result(timeout=2)
+        self.rec.reap()
+        self.assertEqual(len(self.client.calls), 1)
+        self.assertGreater(self.rec.retry_after, __import__('time').time() + 3500)
+        self.metadata.detail = original
+        for _ in range(19):
+            self.rec.db.execute('INSERT INTO attempts VALUES(?)', (__import__('time').time(),))
+        self.rec.retry_after = 0
+        self.rec.maintain()
+        self.rec.future.result(timeout=2)
+        self.assertEqual(len(self.client.calls), 1)
+        self.assertEqual(self.rec.db.execute('SELECT COUNT(*) FROM resolved').fetchone()[0], 2)
+        self.assertEqual(self.rec.db.execute('SELECT COUNT(*) FROM attempts').fetchone()[0], 20)
+
+    def test_rule_edits_invalidate_old_ready_cards_and_enter_prompt(self):
+        path = Path(self.directory.name) / 'rules.toml'
+        path.write_text('min_year=1995\n')
+        self.rec.requirements_path = path
+        self.seed_reserve()
+        self.assertEqual(self.rec.available(), [])
+        rules = self.rec.rules()
+        data = movie(100, recommendation_rules=rules.digest)
+        self.rec.db.execute('UPDATE reserve_pool SET data=? WHERE movie=100', (json.dumps(data),))
+        self.assertEqual([m['id'] for m in self.rec.available()], [100])
+        self.s.cache(data)
+        self.s.set_state(111222333, {'mode': 'new', 'mid': 100, 'rec_batch': [100]})
+        path.write_text('min_year=2001\n')
+        self.assertEqual(self.app.visible_ids(111222333, self.s.user(111222333)['state']), [])
+        self.assertEqual(self.rec.available(), [])
+        client = SolClient(self.directory.name)
+        with patch.object(client, 'ask', return_value={'recommendations': [suggestion(2)]}) as ask:
+            client.generate([], [], {'instructions': 'More mysteries'})
+        self.assertIn('More mysteries', ask.call_args.args[0])
+
+    def test_budget_miss_does_not_block_other_cached_positions(self):
+        from chekino.api import ApiError
+        rules = self.rec.rules()
+        suggestions = [suggestion(2), suggestion(3)]
+        batch = self.rec.db.execute('INSERT INTO batches(profile,suggestions) VALUES(?,?)',
+                                   ('test', json.dumps(suggestions))).lastrowid
+        with patch.object(self.rec, 'resolve', side_effect=[
+                ApiError(429, 'Local metadata API budget exhausted', 3600), movie(3)]):
+            with self.assertRaises(ApiError):
+                self.rec.verify_batch(batch, suggestions, 'test', set(), rules)
+        rows = self.rec.db.execute('SELECT position,movie FROM resolved WHERE batch=?', (batch,)).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['position'], 1)
+        self.assertEqual(json.loads(rows[0]['movie'])['id'], 3)
+
+    def test_known_title_alias_uses_only_cached_detail(self):
+        from chekino.api import Kinopoisk
+        from chekino.cache import MetadataCache
+        cache = MetadataCache(Path(self.directory.name) / 'metadata.sqlite')
+        try:
+            cache.set('/2?', {'kinopoiskId': 2, 'nameRu': 'Фильм 2', 'nameOriginal': 'Film 2',
+                             'year': 2000, 'type': 'FILM', 'countries': [{'country': 'Country Y'}]})
+            metadata = Kinopoisk('placeholder', cache)
+            with patch('chekino.api.request', side_effect=AssertionError('unexpected network')):
+                found = self.rec.resolve(suggestion(2), metadata)
+            self.assertEqual(found['id'], 2)
+            self.assertEqual(cache.db.execute('SELECT COUNT(*) FROM requests').fetchone()[0], 0)
+        finally:
+            cache.db.close()
+
+    def test_country_exclusion_skips_full_detail_request(self):
+        from chekino.requirements import Requirements
+        raw = {'kinopoiskId': 2, 'nameRu': 'Фильм 2', 'nameOriginal': 'Film 2',
+               'year': 2000, 'type': 'FILM', 'countries': [{'country': 'Country X'}]}
+        with patch.object(self.metadata, 'get', return_value={'items': [raw]}), \
+                patch.object(self.metadata, 'detail', side_effect=AssertionError('unnecessary detail')):
+            self.assertIsNone(self.rec.resolve(suggestion(2), rules=Requirements(excluded_countries=('Country X',))))
 
     def test_context_has_separate_anonymous_scores_and_no_ids(self):
         self.s.rate(1, 444555666, 2)

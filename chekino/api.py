@@ -172,6 +172,7 @@ def normalize(raw):
         poster = ''
     return {'id': mid, 'title': raw.get('nameRu') or raw.get('nameOriginal')
             or raw.get('nameEn') or 'Без названия', 'year': raw.get('year'),
+            'countries': [c['country'] for c in raw.get('countries', []) if isinstance(c.get('country'), str)],
             'rating_kp': external_rating(raw.get('ratingKinopoisk')),
             'rating_imdb': external_rating(raw.get('ratingImdb')),
             'kind': raw.get('type', 'UNKNOWN'), 'description': raw.get('description') or '',
@@ -204,6 +205,26 @@ class Kinopoisk:
         if self.cache:
             self.cache.set(cache_key, result)
         return result
+
+    def cached_match(self, names, year):
+        if not self.cache:
+            return None
+        if not hasattr(self, '_cached_names'):
+            index = {}
+            # Store only small aliases/keys, not copies of the cached descriptions.
+            for key, data in self.cache.db.execute("SELECT key,data FROM responses WHERE key GLOB '/[0-9]*'"):
+                raw = json.loads(data)
+                for field in ('nameRu', 'nameOriginal', 'nameEn'):
+                    name = re.sub(r'[^\w]', '', (raw.get(field) or '').casefold().replace('ё', 'е'))
+                    if name:
+                        index.setdefault((name, str(raw.get('year'))), set()).add(key)
+            self._cached_names = index
+        keys = set().union(*(self._cached_names.get((name, str(year)), set()) for name in names))
+        if len(keys) == 1:
+            raw = self.cache.get(next(iter(keys)))
+            if raw is not None:
+                return normalize(raw)
+        return None
 
     def detail(self, mid):
         return normalize(self.get('/' + str(mid)))
