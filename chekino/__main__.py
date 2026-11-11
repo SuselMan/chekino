@@ -119,7 +119,14 @@ def main():
                         app.error(update, 'Источник метаданных недоступен. Ввод сохранён; повтори позже.')
                     actor = (cb or update.get('message') or {}).get('from', {}).get('id')
                     app.deliver(priority=actor)
-                    print(f'Обработка {"кнопки" if cb else "сообщения"}: '
+                    action = 'сообщения'
+                    if cb:
+                        parts = cb.get('data', '').split(':')
+                        kind = parts[1] if len(parts) > 1 else ''
+                        action = 'кнопки ' + (kind if kind in {
+                            'queue', 'random', 'page', 'vote', 'new', 'rate', 'archives',
+                            'archive', 'restore', 'reject', 'add', 'choose', 'history'} else 'unknown')
+                    print(f'Обработка {action}: '
                           f'{time.monotonic() - started:.3f}s', flush=True)
             except ApiError as exc:
                 print(f'Временная ошибка API: код={exc.code}, retry_after={exc.retry_after}; '

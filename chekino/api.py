@@ -100,7 +100,7 @@ class Telegram:
         started = time.monotonic()
         try:
             body = self.request(method, payload,
-                                timeout=3 if method == 'getUpdates' else
+                                timeout=max(10, payload.get('timeout', 0) + 5) if method == 'getUpdates' else
                                 (2 if method == 'answerCallbackQuery' else 8))
         finally:
             elapsed = time.monotonic() - started
@@ -140,10 +140,17 @@ class CallbackAcker:
         return True
 
     def answer(self, callback_id):
-        try:
-            self.telegram.call('answerCallbackQuery', callback_query_id=callback_id)
-        except ApiError:
-            print('Подтверждение кнопки недоступно; карточка обрабатывается независимо.', flush=True)
+        for attempt in range(2):
+            try:
+                self.telegram.call('answerCallbackQuery', callback_query_id=callback_id)
+                return
+            except ApiError as exc:
+                # An idle keepalive socket can be closed by Telegram. Only retry a
+                # transport failure, never expired buttons or rate-limit responses.
+                if exc.code == 0 and attempt == 0:
+                    continue
+                print('Подтверждение кнопки недоступно; карточка обрабатывается независимо.', flush=True)
+                return
 
 
 def canonical_id(text):

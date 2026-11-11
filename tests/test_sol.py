@@ -159,6 +159,35 @@ class SolTests(unittest.TestCase):
                 patch.object(self.metadata, 'detail', side_effect=AssertionError('unnecessary detail')):
             self.assertIsNone(self.rec.resolve(suggestion(2), rules=Requirements(excluded_countries=('Country X',))))
 
+    def test_failed_ai_keeps_queue_random_navigation_and_rating_operational(self):
+        self.client.failure = True
+        self.rec.maintain()
+        with self.assertRaises(RecommendationError):
+            self.rec.future.result(timeout=2)
+        self.rec.maintain()  # Reap the failed model and apply backoff.
+        for mid in (7, 8):
+            self.s.cache(movie(mid))
+            self.s.add(mid)
+        uid = 111222333
+        self.app.handle({'update_id': 1, 'message': {'message_id': 10,
+            'text': '/queue', 'from': {'id': uid}, 'chat': {'id': uid, 'type': 'private'}}})
+        self.app.deliver()
+        def click(number, action):
+            user = self.s.user(uid)
+            self.app.handle({'update_id': number, 'callback_query': {
+                'id': str(number), 'from': {'id': uid},
+                'data': str(user['revision']) + ':' + action,
+                'message': {'message_id': user['message'], 'chat': {'id': uid, 'type': 'private'}}}})
+            self.app.deliver()
+        click(2, 'page:1')
+        self.assertEqual(self.s.user(uid)['state']['mid'], 8)
+        click(3, 'random')
+        mid = self.s.user(uid)['state']['mid']
+        self.assertIn(mid, (7, 8))
+        click(4, 'vote:4')
+        self.assertEqual(self.s.votes(mid), {uid: 4})
+        self.assertEqual(len(self.client.calls), 1)
+
     def test_context_has_separate_anonymous_scores_and_no_ids(self):
         self.s.rate(1, 444555666, 2)
         _, profile, avoid = self.rec.context()

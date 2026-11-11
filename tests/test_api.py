@@ -43,7 +43,20 @@ class ApiTests(unittest.TestCase):
             release.set()
             ack.executor.shutdown(wait=True)
         ack.future.result()
-        self.assertEqual(calls, ['answerCallbackQuery', 'editMessageText'])
+        self.assertEqual(calls, ['answerCallbackQuery', 'editMessageText', 'answerCallbackQuery'])
+
+    def test_ack_reconnects_after_transport_error_but_not_api_error(self):
+        for error, expected in ((ApiError(), 2), (ApiError(400), 1), (ApiError(429), 1)):
+            from unittest.mock import Mock
+            tg = Mock()
+            tg.call.side_effect = [error, True]
+            ack = CallbackAcker(tg)
+            try:
+                ack.submit('test')
+                ack.future.result(timeout=2)
+                self.assertEqual(tg.call.call_count, expected)
+            finally:
+                ack.executor.shutdown(wait=True)
 
     def test_short_poll_uses_durable_offset_without_long_server_wait(self):
         tg = Telegram('placeholder')
@@ -52,7 +65,7 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(tg.poll(42), [])
         self.assertEqual(http.call_args.args[1]['offset'], 42)
         self.assertEqual(http.call_args.args[1]['timeout'], 1)
-        self.assertEqual(http.call_args.kwargs['timeout'], 3)
+        self.assertEqual(http.call_args.kwargs['timeout'], 10)
         sleep.assert_called_once_with(1.0)
 
     def test_short_poll_failure_recovers_without_global_backoff(self):
